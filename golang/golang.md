@@ -37,6 +37,43 @@ Go 中切片扩容的策略是这样的：
 
 一旦元素个数超过 1024 个元素，那么增长因子就变成 1.25 ，即每次增加原来容量的四分之一。
 
+## channel
+
+<-chan 和 chan定义的区别：
+```go
+type Ticker struct {
+	//c can only receive data
+    C  <-chan time.Time 
+	C1 chan time.Time
+}
+```
+
+chan 只读不写或者只写不读会panic。
+
+在写的同时如果读的不及时，可以在写时加入default丢弃数据，而保证不阻塞。
+```go
+func test4() {
+	var ch = make(chan int)
+	go func() {
+		time.Sleep(time.Second)
+		select {
+		case ch <- 1:
+			fmt.Println("send")
+		default:
+			fmt.Println("send default")
+		}
+	}()
+	//time.Sleep(time.Second)
+	select {
+	case t := <-ch:
+		fmt.Println("receive:", t)
+	default:
+		fmt.Println("receive default")
+	}
+	time.Sleep(time.Second)
+}
+```
+
 ## golang内存模型
 **进程**：进程是系统进行资源分配的基本单位，有独立的内存空间。
 
@@ -128,6 +165,28 @@ PageHeap提供了一层缓存，因此PageHeap::New()并非每次都向系统申
 * 另一个span大小为n - k个page，如果n - k > 128，则将其插入到大span的set中，否则，将其插入到对应的小span链表中。
 * 如果找不到合适的span，则使用sbrk或mmap向系统申请新的内存以生成新的span，并重新执行中对象或大对象的分配算法。
 ![img](img/v2-7f6862001e54df832ba538e0a0dad3ba_720w.jpg)
+
+### go内存管理
+
+大对象专门分配，小对象以8的倍数为单位，分成66种规格。
+```go
+// class  bytes/obj  bytes/span  objects  tail waste  max waste
+//     1          8        8192     1024           0     87.50%
+//     2         16        8192      512           0     43.75%
+//     3         32        8192      256           0     46.88%
+//     4         48        8192      170          32     31.52%
+//     5         64        8192      128           
+// 		...
+//    65      28672       57344        2           0      4.91%
+//    66      32768       32768        1           0     12.50%
+```
+![img](img/2020-09-09-105534.png)
+
+顶层堆管理部件（heap）每次向操作系统申请一大块内存（最少1MB），还负责管理未使用的大块内存（span），为大对象直接分配空间。
+
+central从堆提取大块内存，没个central只负责一种规格，不同规格的请求会被分配到不同的中间部件，减小锁粒度。
+在central向heap请求时，会按size class静态表设置大小进行分割，在回收时尝试和相邻未使用的span合并，以形成更大可切分空间。
+
 
 
 
