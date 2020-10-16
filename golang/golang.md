@@ -192,6 +192,26 @@ central从堆提取大块内存，没个central只负责一种规格，不同规
 
 参考：
 
-[[1]TCMalloc解密](https://wallenwang.com/2018/11/tcmalloc/)
+[1] [TCMalloc解密](https://wallenwang.com/2018/11/tcmalloc/)
 
-[[2]Go 语言的内存管理](https://www.zhihu.com/people/tang-xu-83-53)
+[2] [Go 语言的内存管理](https://www.zhihu.com/people/tang-xu-83-53)
+
+## go context
+
+Go 语言中的每一个请求的都是通过一个单独的 Goroutine 进行处理的，HTTP/RPC 请求的处理器往往都会启动新的 Goroutine 访问数据库和 RPC 服务，我们可能会创建多个 Goroutine 来处理一次请求，而 Context 的主要作用就是在不同的 Goroutine 之间同步请求特定的数据、取消信号以及处理请求的截止日期。
+
+当最上层的 Goroutine 因为某些原因执行失败时，下两层的 Goroutine 由于没有接收到这个信号所以会继续工作；但是当我们正确地使用 Context 时，就可以在下层及时停掉无用的工作减少额外资源的消耗.
+
+这其实就是 Golang 中上下文的最大作用，在不同 Goroutine 之间对信号进行同步避免对计算资源的浪费，与此同时 Context 还能携带以请求为作用域的键值对信息。
+
+**Context使用原则**
+
+* context.Background 只应用在最高等级，作为所有派生 context 的根。
+* context 取消是建议性的，这些函数可能需要一些时间来清理和退出。
+* 不要把Context放在结构体中，要以参数的方式传递。
+* 以Context作为参数的函数方法，应该把Context作为第一个参数，放在第一位。
+* 给一个函数方法传递Context的时候，不要传递nil，如果不知道传递什么，就使用context.TODO
+* Context的Value相关方法应该传递必须的数据，不要什么数据都使用这个传递。context.Value 应该很少使用，它不应该被用来传递可选参数。这使得 API 隐式的并且可以引起错误。取而代之的是，这些值应该作为参数传递。
+* Context是线程安全的，可以放心的在多个goroutine中传递。同一个Context可以传给使用其的多个goroutine，且Context可被多个goroutine同时安全访问。
+* Context 结构没有取消方法，因为只有派生 context 的函数才应该取消 context。
+
