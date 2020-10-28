@@ -215,3 +215,168 @@ Go 语言中的每一个请求的都是通过一个单独的 Goroutine 进行处
 * Context是线程安全的，可以放心的在多个goroutine中传递。同一个Context可以传给使用其的多个goroutine，且Context可被多个goroutine同时安全访问。
 * Context 结构没有取消方法，因为只有派生 context 的函数才应该取消 context。
 
+## 延迟语句
+
+defer的语义表明，它会在函数返回、产生恐慌或者`runtime.Goexit`时使用，直觉上看， defer 应该由编译器直接将需要的函数调用插入到该调用的地方，似乎是一个编译期特性， 不应该存在运行时性能问题，非常类似于 C++ 的 RAII(Resource Acquisition is Initialization) 范式（当离开资源的作用域时， 自动执行析构函数）。但实际情况是，由于 defer 并没有与其依赖资源挂钩，也允许在条件、循环语句中出现， 从而不再是一个作用域相关的概念，这就是使得 defer 的语义变得相对复杂。 在一些复杂情况下，无法在编译期决定存在多少个 defer 调用。
+
+对于延迟语句而言，其中间表示会产生三种不同的延迟形式， 第一种是最一般情况下的在堆上分配的延迟语句，第二种是允许在栈上分配的延迟语句， 最后一种则是 开放编码式(Open-coded) 的延迟语句。
+```go
+// src/cmd/compile/internal/gc/ssa.go
+func (s *state) stmt(n *Node) {
+	...
+	switch n.Op {
+	case ODEFER:
+		// 开放编码式 defer
+		if s.hasOpenDefers {
+			s.openDeferRecord(n.Left)
+		} else {
+			// 堆上分配的 defer
+			d := callDefer
+			if n.Esc == EscNever {
+				// 栈上分配的 defer
+				d = callDeferStack
+			}
+			s.call(n.Left, d)
+		}
+	case ...
+	}
+	...
+}
+```
+* 在堆上分配的原因是 defer 语句出现 在了循环语句里，或者无法执行更高阶的编译器优化导致的。如果一个与 defer 出现在循环语句中， 则可执行的次数可能无法在编译期决定；如果一个调用中 defer 由于数量过多等原因， 不能被编译器进行开放编码，则也会在堆上分配 defer。在堆上分配的 defer 需要最多的运行时支持， 因而产生的运行时开销也最大。
+  
+  一个函数中的延迟语句会被保存为一个 _defer 记录的链表，附着在一个 Goroutine 上。 _defer 记录的具体结构也非常简单，主要包含了参与调用的参数大小、 当前 defer 语句所在函数的 PC 和 SP 寄存器、被 defer 的函数的入口地址以及串联 多个 defer 的 link 链表，该链表指向下一个需要执行的 defer。
+  ```golang
+	// src/runtime/panic.go
+	type _defer struct {
+		siz       int32
+		heap      bool
+		sp        uintptr
+		pc        uintptr
+		fn        *funcval
+		link      *_defer
+		...
+	}
+	// src/runtime/runtime2.go
+	type g struct {
+		...
+		_defer *_defer
+		...
+	}
+  ```
+
+* defer 还可以直接在栈上进行分配，在栈上分配 defer 的好处在于函数返回后 _defer 便已得到释放， 不再需要考虑内存分配时产生的性能开销，只需要适当的维护 _defer 的链表即可。
+* 一定情况下能够让 defer 进化为一个仅编译期特性，即在函数末尾直接对延迟函数进行调用， 做到几乎不需要额外的开销。
+  * 没有禁用编译器优化，即没有设置 -gcflags "-N"
+  * 存在 defer 调用
+  * 函数内 defer 的数量不超过 8 个、且返回语句与延迟语句个数的乘积不超过 15
+  * 没有与 defer 发生在循环语句中
+  
+  延迟比特
+
+  如果一个 defer 发生在一个条件语句中，而这个条件必须等到运行时才能确定：
+  ```golang
+  if rand.Intn(100) < 42 {
+	defer fmt.Println("meaning-of-life")
+  }
+  ```
+  如何才能使用最小的成本，让插入到函数末尾的延迟语句，在条件成立时候被正确执行呢？ 这便需要一种机制，能够记录存在延迟语句的条件分支是否被执行， 这种机制在 Go 中利用了延迟比特（defer bit）。
+  
+  使用延迟比特的核心思想可以用下面的伪代码来概括。 在创建延迟调用的阶段，首先通过延迟比特的特定位置记录哪些带条件的 defer 被触发。 这个延迟比特是一个长度为 8 位的二进制码（也是硬件架构里最小、最通用的情况）， 以每一位是否被设置为 1，来判断延迟语句是否在运行时被设置，如果设置，则发生调用。 否则则不调用：
+  
+  在退出位置，再重新根据被标记的延迟比特，反向推导哪些位置的 defer 需要被触发，从而 执行延迟调用：
+  ```golang
+  defer f1(a1)
+  if cond {
+	defer f2(a2)
+  }
+
+	//伪代码
+  deferBits = 0           // 初始值 00000000
+  deferBits |= 1 << 0     // 遇到第一个 defer，设置为 00000001
+  _f1 = f1
+  _a1 = a1
+  if cond {
+	// 如果第二个 defer 被设置，则设置为 00000011，否则依然为 00000001
+	deferBits |= 1 << 1
+	_f2 = f2
+	_a2 = a2
+  }
+
+
+  exit:
+  // 按顺序倒序检查延迟比特。如果第二个 defer 被设置，则
+  //   00000011 & 00000010 == 00000010，即延迟比特不为零，应该调用 f2。
+  // 如果第二个 defer 没有被设置，则 
+  //   00000001 & 00000010 == 00000000，即延迟比特为零，不应该调用 f2。
+  if deferBits & 1 << 1 != 0 { // 00000011 & 00000010 != 0
+	deferBits &^= 1<<1       // 00000001
+	_f2(_a2)
+  }
+  // 同理，由于 00000001 & 00000001 == 00000001，因此延迟比特不为零，应该调用 f1
+  if deferBits && 1 << 0 != 0 {
+	deferBits &^= 1<<0
+	_f1(_a1)
+  }
+  ```
+
+## 同步
+
+**自旋锁**
+
+自旋锁与互斥锁类似，自旋锁不会引起调用者的睡眠，如果自旋锁已经被其他执行单元保持，调用者就一直循环在那里看是否自旋锁的保持者已经释放了锁。其作用是为了解决某项资源的互斥使用。因为自旋锁不会引起调用者睡眠，所以自旋锁的效率远 高于互斥锁。
+
+自旋锁一直占用CPU，他在未获得锁的情况下，一直运行。
+
+在用自旋锁时有可能造成死锁，当递归调用时有可能造成死锁，调用有些其他函数也可能造成死锁。
+
+自旋锁适用于锁使用者保持锁时间比较短的情况下。
+
+**互斥锁**
+
+互斥锁属于sleep-waiting类型的锁。例如在一个双核的机器上有两个线程(线程A和线程B)，它们分别运行在Core0和 Core1上。假设线程A想要通过pthread_mutex_lock操作去得到一个临界区的锁，而此时这个锁正被线程B所持有，那么线程A就会被阻塞 (blocking)，Core0 会在此时进行上下文切换(Context Switch)将线程A置于等待队列中，此时Core0就可以运行其他的任务(例如另一个线程C)而不必进行忙等待。
+
+而自旋锁则不然，它属于busy-waiting类型的锁，如果线程A是使用pthread_spin_lock操作去请求锁，那么线程A就会一直在 Core0上进行忙等待并不停的进行锁请求，直到得到这个锁为止。
+
+互斥锁：线程会从sleep（加锁）——>running（解锁），过程中有上下文的切换，cpu的抢占，信号的发送等开销。
+
+自旋锁：线程一直是running(加锁——>解锁)，死循环检测锁的标志位，机制不复杂。
+
+
+**条件变量**
+
+https://zhuanlan.zhihu.com/p/75220465
+
+```golang
+type Mutex struct {
+	state int32  // 表示 mutex 锁当前的状态
+	//goroutine会在这个值上设置各种标志位，用于获取这个锁的goroutine通信，（cas)
+	sema  uint32 // 信号量，用于唤醒 goroutine
+	//通过runtime_Semrelease唤醒一个使用Semacquire阻塞在这个信号量的goroutine
+}
+```
+```go
+const (
+	mutexLocked = 1 << iota // 互斥锁已锁住
+	mutexWoken
+	mutexStarving
+	mutexWaiterShift = iota
+	starvationThresholdNs = 1e6
+)
+```
+Mutex 可能处于两种不同的模式：正常模式和饥饿模式。
+
+在正常模式中，等待者按照 FIFO 的顺序排队获取锁，但是一个被唤醒的等待者有时候并不能获取 mutex， 它还需要和新到来的 goroutine 们竞争 mutex 的使用权。 新到来的 goroutine 存在一个优势，它们已经在 CPU 上运行且它们数量很多， 因此一个被唤醒的等待者有很大的概率获取不到锁，在这种情况下它处在等待队列的前面。 如果一个 goroutine 等待 mutex 释放的时间超过 1ms，它就会将 mutex 切换到饥饿模式
+
+在饥饿模式中，mutex 的所有权直接从解锁的 goroutine 递交到等待队列中排在最前方的 goroutine。 新到达的 goroutine 们不要尝试去获取 mutex，即使它看起来是在解锁状态，也不要试图自旋， 而是排到等待队列的尾部。
+
+如果一个等待者获得 mutex 的所有权，并且看到以下两种情况中的任一种：
+
+1) 它是等待队列中的最后一个，
+2) 它等待的时间少于 1ms，它便将 mutex 切换回正常操作模式
+
+正常模式下的性能会更好，因为一个 goroutine 能在即使有很多阻塞的等待者时多次连续的获得一个 mutex，饥饿模式的重要性则在于避免了病态情况下的尾部延迟。
+
+
+
+
