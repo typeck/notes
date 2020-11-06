@@ -377,6 +377,140 @@ Mutex 可能处于两种不同的模式：正常模式和饥饿模式。
 
 正常模式下的性能会更好，因为一个 goroutine 能在即使有很多阻塞的等待者时多次连续的获得一个 mutex，饥饿模式的重要性则在于避免了病态情况下的尾部延迟。
 
+**条件变量**
+
+sync.Cond 的内部结构包含一个锁（Locker）、通知列表（notifyList）以及一个复制检查器 copyChecker。
+
+```go
+type Locker interface {
+	Lock()
+	Unlock()
+}
+type Cond struct {
+	L Locker
+
+	notify  notifyList
+	checker copyChecker
+}
+func NewCond(l Locker) *Cond {
+	return &Cond{L: l}
+}
+```
+copychecker
+```go
+// copyChecker 保存指向自身的指针来检测对象的复制行为。
+type copyChecker uintptr
+
+func (c *copyChecker) check() {
+	if uintptr(*c) != uintptr(unsafe.Pointer(c)) &&
+		!atomic.CompareAndSwapUintptr((*uintptr)(c), 0, uintptr(unsafe.Pointer(c))) &&
+		uintptr(*c) != uintptr(unsafe.Pointer(c)) {
+		panic("sync.Cond is copied")
+	}
+}
+
+type cond struct {
+	c copyChecker
+}
+
+func test15() {
+	var c cond
+	c.c = copyChecker(unsafe.Pointer(&c))
+	var c1 = c
+	c1.c.check()
+}
+```
+Wait / Signal / Broadcast
+
+Wait/Signal/Broadcast 都是由通知列表来实现的，撇开 copyChecker， Wait 无非就是向 notifyList 注册一个通知，而后阻塞到被通知， Signal 则负责通知一个在 notifyList 注册过的 waiter 发出通知， Broadcast 更是直接粗暴的向所有人都发出通知。
+
+核心是notifyList，本质上是一个队列
+```go
+// notifyList 基于 ticket 实现通知列表
+type notifyList struct {
+	// wait 为下一个 waiter 的 ticket 编号
+	// 在没有 lock 的情况下原子自增
+	wait uint32
+
+	// notify 是下一个被通知的 waiter 的 ticket 编号
+	// 它可以在没有 lock 的情况下进行读取，但只有在持有 lock 的情况下才能进行写
+	//
+	// wait 和 notify 会产生 wrap around，只要它们 "unwrapped"
+	// 的差别小于 2^31，这种情况可以被正确处理。对于 wrap around 的情况而言，
+	// 我们需要超过 2^31+ 个 goroutine 阻塞在相同的 condvar 上，这是不可能的。
+	//
+	notify uint32
+	// waiter 列表.
+	lock mutex
+	head *sudog
+	tail *sudog
+}
+```
+如果l.wait == l.notify 则表示 上次通知后没有新的 waiter， 可以直接返回。
+
+**同步组**
+
+sync.WaitGroup 可以达到并发 Goroutine 的执行屏障的效果，等待多个 Goroutine 执行完毕。
+
+```go
+// WaitGroup 用于等待一组 Goroutine 执行完毕。
+// 主 Goroutine 调用 Add 来设置需要等待的 Goroutine 的数量
+// 然后每个 Goroutine 运行并调用 Done 来确认已经执行网完毕
+// 同时，Wait 可以用于阻塞并等待所有 Goroutine 完成。
+//
+// WaitGroup 在第一次使用后不能被复制
+type WaitGroup struct {
+	// 64 位值: 高 32 位用于计数，低 32 位用于等待计数
+	// 64 位的原子操作要求 64 位对齐，但 32 位编译器无法保证这个要求
+	// 因此分配 12 字节然后将他们对齐，其中 8 字节作为状态，其他 4 字节用于存储原语
+	state1 [3]uint32
+}
+```
+
+在32位平台上对64的uint操作不可能是原子的，要分两个指令取数，比如在读取一个字长度的时候，另外一个字的数据很有可能已经发生改变了(在32位操作系统上,字长是4，而uint64长度为8)。所以在实际计数的时候，其实sync.WaitGroup也就使用了4个字节来进行。
+
+```go
+// state 返回 wg.state1 中存储的状态和原语字段
+func (wg *WaitGroup) state() (statep *uint64, semap *uint32) {
+	if uintptr(unsafe.Pointer(&wg.state1))%8 == 0 {
+		return (*uint64)(unsafe.Pointer(&wg.state1)), &wg.state1[2]
+	}
+	return (*uint64)(unsafe.Pointer(&wg.state1[1])), &wg.state1[0]
+}
+```
+如果起始地址不能被8整除，那么偏移一位 &WaitGroup.State1[1]一定能被8整除。
+
+todo: (32位机器一定可以整除，64位一定不可以么？)
+
+**补充：内存对齐**
+1) 结构体变量的起始地址能够被其最宽的成员大小整除
+2) 结构体每个成员相对于起始地址的偏移能够被其自身大小整除，如果不能则在前一个成员后面补充字节
+3) 结构体总体大小能够被最宽的成员的大小整除，如不能则在后面补充字节
 
 
+Add 将 statep 的值作为两段来处理，前 32 位处理为计数器，后 32 位处理为等待器。
 
+- 在初始阶段，等待器为 0 ，计数器随着 Add 正数的调用而增加。
+- 如果 Add 使用错误导致计数器为负，则会立即 panic
+- 由于并发的效果，计数器和等待器的值是分开操作的，因此可能出现计数器已经为零（说明当前 Add 的操作为负，即 Done），但等待器为正的情况，依次调用存储原语释放产生的阻塞（本质上为加 1 操作）
+
+整个流程：
+```go
+wg := sync.WaitGroup{}
+wg.Add(1)
+go func() { wg.Done() }()
+wg.Wait()
+```
+在 wg 创建之初，计数器、等待器、存储原语的值均初始化为零值。不妨假设调用 wg.Add(1)，则计数器加 1 等待器、存储原语保持不变，均为 0。
+
+wg.Done() 和 wg.Wait() 的调用顺序可能成两种情况：
+
+情况 1：先调用 wg.Done() 再调用 wg.Wait()。
+
+这时候 wg.Done() 使计数器减 1 ，这时计数器、等待器、存储原语均为 0，由于等待器为 0 则 runtime_Semrelease 不会被调用。 于是当 wg.Wait() 开始调用时，读取到计数器已经为 0，循环退出，wg.Wait() 调用完毕。
+
+情况 2：先调用 wg.Wait() 再调用 wg.Done()。
+
+这时候 wg.Wait() 开始调用时，读取到计数器为 1，则为等待器加 1，并调用 runtime_Semacquire 开始阻塞在存储原语为 0 的状态。
+
+在阻塞的过程中，Goroutine 被调度器调度，开始执行 wg.Done()，于是计数器清零，但由于等待器为 1 大于零。 这时将等待器也清零，并调用与等待器技术相同次数（此处为 1 次）的 runtime_Semrelease，这导致存储原语的值变为 1，计数器和等待器均为零。 这时，runtime_Semacquire 在存储原语大于零后被唤醒，这时检查计数器和等待器是否为零（如果不为零则说明 Add 与 Wait 产生并发调用，直接 panic），这时他们为 0，因此进入下一个循环，当再次读取计数器时，发现计数器已经清理，于是退出 wg.Wait() 调用，结束阻塞。
