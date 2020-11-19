@@ -46,3 +46,5 @@ Git 会有很多合并策略，其中常见的是 Fast-forward、Recursive 、Ou
 **防止pull代码时的用户登录验证**
 
 `git config --global url."git@gitlab.ushareit.me:".insteadOf "https://gitlab.ushareit.me"`
+
+https://blog.csdn.net/liuchunming033/article/details/87195568
