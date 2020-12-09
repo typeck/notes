@@ -571,3 +571,57 @@ P 只是处理器的抽象，而非处理器本身，它存在的意义在于实
 - 管理了可被复用的 G 的全局缓存
 - 管理了 defer 池
 
+## 内存分配
+Go 的内存分配器主要包含以下几个核心组件：
+
+- heapArena: 保留整个虚拟地址空间
+- mheap：分配的堆，在页大小为 8KB 的粒度上进行管理
+- mspan：是 mheap 上管理的一连串的页
+- mcentral：收集了给定大小等级的所有 span
+- mcache：为 per-P 的缓存。
+
+其中页是向操作系统申请内存的最小单位，目前设计为 8KB。
+
+**heapArena**
+
+Go 堆被视为由多个 arena 组成，每个 arena 在 64 位机器上为 64MB，且起始地址与 arena 的大小对齐， 所有的 arena 覆盖了整个 Go 堆的地址空间。
+
+**mspan**
+
+然而管理 arena 如此粒度的内存并不符合实践，相反，所有的堆对象都通过 span 按照预先设定好的 大小等级分别分配，小于 32KB 的小对象则分配在固定大小等级的 span 上，否则直接从 mheap 上进行分配。
+
+mspan 是相同大小等级的 span 的双向链表的一个节点，每个节点还记录了自己的起始地址、 指向的 span 中页的数量。
+
+**mcache**
+是一个 per-P 的缓存，它是一个包含不同大小等级的 span 链表的数组，其中 mcache.alloc 的每一个数组元素 都是某一个特定大小的 mspan 的链表头指针。
+
+当 mcache 中 span 的数量不够使用时，会向 mcentral 的 nonempty 列表中获得新的 span。
+
+**mcentral**
+
+当 mcentral 中 nonempty 列表中也没有可分配的 span 时，则会向 mheap 提出请求，从而获得 新的 span，并进而交给 mcache。
+
+Go 程序的执行是基于 goroutine 的，goroutine 和传统意义上的程序一样，也有栈和堆的概念。只不过 Go 的运行时帮我们屏蔽掉了这两个概念，只在运行时内部区分并分别对应：goroutine 执行栈以及 Go 堆。
+
+**小对象分配**
+
+当对一个小对象（<32KB）分配内存时，会将该对象所需的内存大小调整到某个能够容纳该对象的大小等级（size class）， 并查看 mcache 中对应等级的 mspan，通过扫描 mspan 的 freeindex 来确定是否能够进行分配。
+
+当没有可分配的 mspan 时，会从 mcentral 中获取一个所需大小空间的新的 mspan，从 mcentral 中分配会对其进行加锁， 但一次性获取整个 span 的过程均摊了对 mcentral 加锁的成本。
+
+如果 mcentral 的 mspan 也为空时，则它也会发生增长，从而从 mheap 中获取一连串的页，作为一个新的 mspan 进行提供。 而如果 mheap 仍然为空，或者没有足够大的对象来进行分配时，则会从操作系统中分配一组新的页（至少 1MB）， 从而均摊与操作系统沟通的成本。
+
+**微对象分配**
+
+对于过小的微对象（<16B），它们的分配过程与小对象的分配过程基本类似，但是是直接存储在 mcache 上，并由其以 16B 的块大小直接进行管理和释放。
+
+**大对象分配**
+
+大对象分配非常粗暴，不与 mcache 和 mcentral 沟通，直接绕过并通过 mheap 进行分配。
+
+![img](img/mem-struct.png)
+
+heap 最中间的灰色区域 arena 覆盖了 Go 程序的整个虚拟内存， 每个 arena 包括一段 bitmap 和一段指向连续 span 的指针； 每个 span 由一串连续的页组成；每个 arena 的起始位置通过 arenaHint 进行记录。
+
+分配的顺序从右向左，代价也就越来越大。 小对象和微对象优先从白色区域 per-P 的 mcache 分配 span，这个过程不需要加锁（白色）； 若失败则会从 mheap 持有的 mcentral 加锁获得新的 span，这个过程需要加锁，但只是局部（灰色）； 若仍失败则会从右侧的 free 或 scav 进行分配，这个过程需要对整个 heap 进行加锁，代价最大（黑色）。
+
