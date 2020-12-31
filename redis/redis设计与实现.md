@@ -201,3 +201,161 @@ Redis 使用 MurmurHash2 算法来计算键的哈希值。
 
 在渐进式 rehash 执行期间， 新添加到字典的键值对一律会被保存到 ht[1] 里面， 而 ht[0] 则不再进行任何添加操作： 这一措施保证了 ht[0] 包含的键值对数量会只减不增， 并随着 rehash 操作的执行而最终变成空表。
 
+## skiplsit
+
+```c
+typedef struct zskiplistNode {
+    //存储对象
+    sds ele;
+    // score 分值，跳表是排序链表，使用score排序。
+    double score;
+    //后退指针
+    struct zskiplistNode *backward;
+    //层,
+    struct zskiplistLevel {
+        //前进指针
+        struct zskiplistNode *forward;
+        //跨度，用来计算元素排名的，在查找的过程中，将沿途访问过的所有层的跨度累积起来，就可以得到目标节点在跳表中的排位
+        unsigned long span;
+    } level[];
+} zskiplistNode;
+
+typedef struct zskiplist {
+    struct zskiplistNode *header, *tail;
+    unsigned long length;
+    int level;
+} zskiplist
+
+//有序集合结构体
+typedef struct zset {
+    /*
+     * Redis 会将跳跃表中所有的元素和分值组成 
+     * key-value 的形式保存在字典中
+     * todo：注意：该字典并不是 Redis DB 中的字典，只属于有序集合
+     */
+    dict *dict;
+    /*
+     * 底层指向的跳跃表的指针
+     */
+    zskiplist *zsl;
+} zset;
+```
+![img](img/Redis跳跃表.png)
+
+初始化
+```c
+// t_zset.c
+zskiplistNode *zslCreateNode(int level, double score, sds ele) {
+    zskiplistNode *zn =
+        zmalloc(sizeof(*zn)+level*sizeof(struct zskiplistLevel));
+    zn->score = score;
+    zn->ele = ele;
+    return zn;
+}
+
+/* Create a new skiplist. */
+zskiplist *zslCreate(void) {
+    int j;
+    zskiplist *zsl;
+    //分配内存空间
+    zsl = zmalloc(sizeof(*zsl));
+    //默认只有一层索引
+    zsl->level = 1;
+    //0 个节点
+    zsl->length = 0;
+    //1、创建一个 node 节点，这是个哨兵节点
+    //2、为 level 数组分配 ZSKIPLIST_MAXLEVEL=32 内存大小
+    //3、也即 redis 中支持索引最大 32 层
+    zsl->header = zslCreateNode(ZSKIPLIST_MAXLEVEL,0,NULL);
+    //为哨兵节点的 level 初始化
+    for (j = 0; j < ZSKIPLIST_MAXLEVEL; j++) {
+        zsl->header->level[j].forward = NULL;
+        zsl->header->level[j].span = 0;
+    }
+    zsl->header->backward = NULL;
+    zsl->tail = NULL;
+    return zsl;
+}
+```
+插入
+```c
+
+// span:与下一个节点直接的跨度（之间有多少个节点）
+//rank: 等于新节点再最底层链表的排名，就是它前面有多少个节点
+zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
+    //update数组将用于记录新节点在每一层索引的目标插入位置
+    zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;//32
+    //rank数组记录目标节点每一层的排名
+    unsigned int rank[ZSKIPLIST_MAXLEVEL];
+    int i, level;
+
+    serverAssert(!isnan(score));
+    //指向哨兵节点
+    x = zsl->header;
+    //这一段就是遍历每一层索引，找到最后一个小于当前给定score值的节点
+    //从高层索引向底层索引遍历
+    for (i = zsl->level-1; i >= 0; i--) {
+        //rank记录的是节点的排名，正常情况下给它初始值等于上一层目标节点的排名
+        //如果当前正在遍历最高层索引，那么这个初始值暂时给0
+        rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
+        while (x->level[i].forward &&
+                (x->level[i].forward->score < score ||
+                    (x->level[i].forward->score == score &&
+                    sdscmp(x->level[i].forward->ele,ele) < 0)))
+        {
+            //我们说过level结构中，span表示的是与后面一个节点的跨度
+            //rank[i]最终会得到我们要找的目标节点的排名，也就是它前面有多少个节点
+            rank[i] += x->level[i].span;
+            //挪动指针
+            x = x->level[i].forward;
+        }
+        update[i] = x;
+    }
+    //至此，update数组中已经记录好，每一层最后一个小于给定score值的节点
+    //我们的新节点只需要插在他们后即可
+    
+    //random算法获取一个平衡跳表的level值，标志着我们的新节点将要在哪些索引出现
+    //具体算法这里不做分析，你也可以私下找我讨论
+    level = zslRandomLevel();
+    //如果产生值大于当前跳表最高索引
+    if (level > zsl->level) {
+        //为高出来的索引层赋初始值，update[i]指向哨兵节点
+        for (i = zsl->level; i < level; i++) {
+            rank[i] = 0;
+            update[i] = zsl->header;
+            update[i]->level[i].span = zsl->length;
+        }
+        zsl->level = level;
+    }
+    //根据score和ele创建节点
+    x = zslCreateNode(level,score,ele);
+    //每一索引层得进行新节点插入，建议对照我之前给出的跳表示意图
+    for (i = 0; i < level; i++) {
+        //断开指针，插入新节点
+        x->level[i].forward = update[i]->level[i].forward;
+        update[i]->level[i].forward = x;
+
+        //rank[0]等于新节点再最底层链表的排名，就是它前面有多少个节点
+        //update[i]->level[i].span记录的是目标节点与后一个索引节点之间的跨度，即跨越了多少个节点
+        //得到新插入节点与后一个索引节点之间的跨度
+        x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
+        //修改目标节点的span值
+        update[i]->level[i].span = (rank[0] - rank[i]) + 1;
+    }
+
+    //如果上面产生的平衡level大于跳表最高使用索引，我们上面说会为高出部分做初始化
+    //这里是自增他们的span值，因为新插入了一个节点，跨度自然要增加
+    for (i = level; i < zsl->level; i++) {
+        update[i]->level[i].span++;
+    }
+
+    //修改 backward 指针与 tail 指针
+    x->backward = (update[0] == zsl->header) ? NULL : update[0];
+    if (x->level[0].forward)
+        x->level[0].forward->backward = x;
+    else
+        zsl->tail = x;
+    zsl->length++;
+    return x;
+}
+```

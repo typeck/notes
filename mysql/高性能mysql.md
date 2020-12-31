@@ -302,10 +302,181 @@ select id from url where url= "http//xxxx.com" and url_crc=CRC32("http//xxxx.com
   Sending data
 
   这表示多种情况：线程可能在多个状态之间传送数据，或者在生成结果集，或者在向客户端返回数据。
+
 - 查询缓存
   
   在解析一个查询语句之前，如果查询缓存是打开的，那么 MySQL 会优先检查这个查询是否命中查询缓存中的数据。检查是通过对大小写敏感的哈希查找实现的。不匹配则进行下一阶段处理。
+
 - 查询优化处理
 
   查询的生命周期的下一步是将一个 SQL 转换成一个执行计划，MySQL 再按照这个执行计划和存储引擎进行交互。这包含多个子阶段： 解析 SQL、预处理、优化 SQL 执行计划。
+    - 语法解析器和预处理
+  
+      通过关键字将SQL解析，生成解析树。语法验证、解析查询、验证权限。
+    - 查询优化器
+      
+      优化器将语法树解析为执行计划。MySQL使用基于成本的优化器(有些时候并不是最快的)，尝试预测一个查询使用某种执行计划的成本，并选择成本最小的一个。可以通过查询当前会话的Last_query_cost来得知mysql计算的当前查询的成本。
 
+      `SELECT * FROM third_party_offer_info;SHOW STATUS LIKE 'Last_query_cost';`
+
+      MySQL能处理的优化类型：
+
+      1，重新定义关联表的顺序；
+
+      2，将外连接转化成内连接；
+
+      3，使用等价变换规则（5=5 and a>5 将被改为a>5）；
+
+      4， 优化count()、min()、max()，例如找到某一列的最小值，只需查询对应b-tree索引最左端的记录。explain中可以看到"select tables optimized away"。
+
+      5，预估并转化为常数表达式。
+      ```sql
+      USE sakila;
+
+      EXPLAIN
+      SELECT
+        f.film_id,
+        fa.actor_id
+      FROM film f
+        INNER JOIN film_actor fa USING (film_id)
+      WHERE f.film_id = 1 \G
+
+      *************************** 1. row ***************************
+                id: 1
+        select_type: SIMPLE
+              table: f
+        partitions: NULL
+              type: const
+      possible_keys: PRIMARY
+                key: PRIMARY
+            key_len: 2
+                ref: const
+              rows: 1
+          filtered: 100.00
+              Extra: Using index
+      *************************** 2. row ***************************
+                id: 1
+        select_type: SIMPLE
+              table: fa
+        partitions: NULL
+              type: ref
+      possible_keys: idx_fk_film_id
+                key: idx_fk_film_id
+            key_len: 2
+                ref: const
+              rows: 10
+          filtered: 100.00
+              Extra: Using index
+      ```  
+      使用了using子句，优化器知道这也限制了film_id在整个查询过程中都始终是一个常量--因为它必须等于where子句中的那个取值。
+      6，覆盖索引扫描（如前覆盖索引）
+
+      7，子查询优化
+
+      8，提前终止查询（limit或者发现一个不成立的条件）
+
+      9，等值传播。如果两个列的值通过等式关联，MySQL能把其中一个列的where条件传递到另一个列上。
+
+      10，列表IN()的比较。MySQL将IN()列表中的数据先进行排序，然后通过二分查找的方式确定列表中的值是否满足条件，olog(n)复杂度。
+- 数据和索引的统计信息
+  
+  统计信息由存储引擎实现。MySQL查询优化器在生成执行计划时需要向存储引擎获取相应的统计信息（表和索引的页面、索引基数、数据行和索引长度等）会影响优化器。
+
+- MySQL如何执行关联查询
+
+  MySQL认为每个查询都是一个关联，所以理解MySQL如何执行关联查询至关重要。
+  
+  关联策略：MySQL对任何的关联都执行嵌套循环关联操作，即MySQL先在一个表中循环取出单条数据，然后嵌套循环到下一个表中寻找匹配的行，依次直到找到所有表中匹配的行。然后根据各个表匹配的行，返回查询需要的各个列。MySQL会尝试在最后一个关联表中找到所有匹配的行，如果最后一个关联表无法找到更多的行后，MySQL返回到上一层关联表，看是否能找到更多的匹配记录，以此类推迭代执行。
+
+
+  ```sql
+  -- 内关联查询 ----------------------------------------------------
+  SELECT
+    tbl1.col1,
+    tbl2.col2
+  FROM tbl1
+    INNER JOIN tbl2 USING (col3)
+  WHERE tbl1.col1 IN (5, 6);
+
+  -- 用伪代码来解释 MySQL 关联执行的策略则是如下：
+  outer_iter = iteratro over tbl1 WHERE col1 IN (5, 6)
+  outer_row = outer_iter.next
+  while outer_row
+      inner_iter = iteratro over tbl2 WHERE col3 = outer_row.col3
+      inner_row  = inner_iter.next
+      while inner_row
+          output [outer_row.col1, inner_row.col2]
+          inner_row = inner_iter.next
+      end
+      outer_row = outer_iter.next
+  end
+
+  -- 左外关联查询 --------------------------------------------------
+
+  SELECT
+    tbl1.col1,
+    tbl2.col2
+  FROM tbl1
+    LEFT OUTER JOIN tbl2 USING (col3)
+  WHERE tbl1.col1 IN (5, 6);
+
+  -- 用伪代码来解释 MySQL 关联执行的策略则是如下：
+  outer_iter = iteratro over tbl1 WHERE col1 IN (5, 6)
+  outer_row = outer_iter.next
+  while outer_row
+      inner_iter = iteratro over tbl2 WHERE col3 = outer_row.col3
+      inner_row  = inner_iter.next
+      if inner_row
+          while inner_row
+              output [outer_row.col1, inner_row.col2]
+              inner_row = inner_iter.next
+          end
+      else
+          output [outer_row.col1, NULL]
+      end
+      outer_row = outer_iter.next
+  end
+  ```
+  ![img](img/related_query_lane.png)
+  从本质上说，MySQL对所有类型的查询都以同样的方式运行。例如：MySQL在from子句中遇到子查询时，先执行子查询并将其结果放到一个临时表中，然后将这个表当作一个普通表对待。
+- 执行计划
+  
+  MySQL生成查询的一棵指令数，然后通过存储引擎执行这棵指令树并返回查询结果。
+- 关联查询优化器
+  
+  关联查询优化决定了多个表关联时的顺序。多表关联时会评估不同顺序的成本来选择一个代价最小的关联顺序。关联优化器会尝试在所有的关联顺序中选择一个成本最小的来生成执行计划树，如果可能，优化器会遍历每一个表然后逐个做嵌套循环计算每一棵树的成本，最后返回一个最优的执行计划。
+- 排序优化
+  当不能使用索引生成排序结果的时候，MySQL需要自己进行排序，如果数量小在内存中进行，如果数据量大，则需要使用磁盘（统称为filesort）。
+
+  MySQL在排序时会对每一个排序记录分配一个足够长的定长空间来存放。这个空间必须足够长以容纳其中最长的字符串，例如varchar需要分配其完整长度。
+
+  如果order by子句中所有的列都来自关联的第一个表，那么MySQL在处理第一个表的时候就进行文件排序。（explain extra字段会有“Using filesort”）余下所有情况，都会将关联结果放到一个临时表中，在进行文件排序。（Using temporary；Using filesort）limit会在排序后应用。
+
+### 分库分表分片
+
+**分库分表**
+- 水平拆分
+  
+  某个字段按一定规律进行拆分，将一个表的数据分到多个表（库）中降低表的数据量，优化查询数据量的方式，来提高性能。
+
+  特点：
+  
+   ①.每个库（表）的结构都一样。②.每个库（表）的数据都不一样。③.每个库（表）的并集是整个数据库的全量数据。
+  
+  分库分表常见算法： 
+
+  ①.Hash取模：通过表的一列字段进行hash取出code值来区分的。（不好迁移） ②.Range范围： 按年份、按时间。（不好查找，如果找个数据没有时间，需要全部找） ③.List预定义：事先设定100找。（判断需要建立多少个分库）
+
+  分库分表之后带来的问题：
+    
+  ①.查询数据结果集合并。②.sql的改变。③.分布式事务。④.全局唯一性id。
+
+- 垂直拆分：
+  
+  将一个字段（属性）比较多的表拆分成多个小表，将不同字段放到不同的表中降低单（表）库大小的目的来提高性能。
+
+  特点：
+
+  ①. 每个库（表）的结构都不一样。②.每个库（表）数据都（至少有一列）一样。③.每个库（表）的并集是整个数据库的全量数据。④.每个库（表）的数据量（count）不会变的。
+
+  
