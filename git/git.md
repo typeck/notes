@@ -31,7 +31,7 @@ Linus 解释了“当前目录缓存”的设计，该缓存就是一个二进�
 
 1) [改变世界的一次代码提交](https://hutusi.com/the-greatest-git-commit)
 
-## 使用
+## Usage
 **git合并**
 两个文件的合并需要三向合并，所谓三向合并，就是找到两个文件的一个合并 base，如下图，这样子 Git 就可以很清楚的知道说，对方修改了这一行代码，而我们没有修改，自动帮我们合并这两个文件为 Print("hello")。
 ![img](img/v2-c8ad9474d401b2f1128980911ad3d9b0_720w.jpg)
@@ -48,3 +48,16 @@ Git 会有很多合并策略，其中常见的是 Fast-forward、Recursive 、Ou
 `git config --global url."git@gitlab.ushareit.me:".insteadOf "https://gitlab.ushareit.me"`
 
 https://blog.csdn.net/liuchunming033/article/details/87195568
+
+**中文乱码**
+```sh
+$ git config --global core.quotepath false # 设置 git status utf-8编码
+
+$ git config --global gui.encoding utf-8 # 设置Git GUI界面utf-8编码
+
+$ git config --global i18n.commit.encoding utf-8 #设置commit信息utf-8编码
+
+$ git config --global i18n.logoutputencoding utf-8 # 设置输出 log utf-8 编码
+
+export LESSCHARSET=utf-8
+```

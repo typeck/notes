@@ -88,3 +88,9 @@ ALTER TABLE third_party_offer_info PARTITION BY RANGE ( dsp_id ) (
 12) subpartition问题： subpartition必须使用HASH或KEY分区。 只有RANGE和LIST分区可能被分区; HASH和KEY分区不能被子分区。
 13) 分区表不支持mysqlcheck，myisamchk和myisampack。 
 
+## 基本命令
+
+**修改字段**
+```sql
+ALTER TABLE user10 MODIFY card CHAR(10) AFTER test;
+```

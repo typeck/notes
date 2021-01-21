@@ -184,7 +184,7 @@ PageHeap提供了一层缓存，因此PageHeap::New()并非每次都向系统申
 
 顶层堆管理部件（heap）每次向操作系统申请一大块内存（最少1MB），还负责管理未使用的大块内存（span），为大对象直接分配空间。
 
-central从堆提取大块内存，没个central只负责一种规格，不同规格的请求会被分配到不同的中间部件，减小锁粒度。
+central从堆提取大块内存，每个central只负责一种规格，不同规格的请求会被分配到不同的中间部件，减小锁粒度。
 在central向heap请求时，会按size class静态表设置大小进行分割，在回收时尝试和相邻未使用的span合并，以形成更大可切分空间。
 
 
@@ -596,6 +596,73 @@ mspan 是相同大小等级的 span 的双向链表的一个节点，每个节�
 是一个 per-P 的缓存，它是一个包含不同大小等级的 span 链表的数组，其中 mcache.alloc 的每一个数组元素 都是某一个特定大小的 mspan 的链表头指针。
 
 当 mcache 中 span 的数量不够使用时，会向 mcentral 的 nonempty 列表中获得新的 span。
+
+mcache是一个per-P的缓存
+```go
+//go:notinheap
+type mcache struct {
+	// 下面的成员在每次 malloc 时都会被访问
+	// 因此将它们放到一起来利用缓存的局部性原理
+	next_sample uintptr	// 分配这么多字节后触发堆样本
+	local_scan  uintptr // 分配的可扫描堆的字节数
+
+	// 没有指针的微小对象的分配器缓存。
+	// 请参考 malloc.go 中的 "小型分配器" 注释。
+	//
+	// tiny 指向当前 tiny 块的起始位置，或当没有 tiny 块时候为 nil
+	// tiny 是一个堆指针。由于 mcache 在非 GC 内存中，我们通过在
+	// mark termination 期间在 releaseAll 中清除它来处理它。
+	tiny             uintptr
+	tinyoffset       uintptr
+	local_tinyallocs uintptr // 不计入其他统计的极小分配的数量
+
+	// 下面的不在每个 malloc 时被访问
+
+	alloc [numSpanClasses]*mspan // 用来分配的 spans，由 spanClass 索引
+
+	stackcache [_NumStackOrders]stackfreelist
+
+	// 本地分配器统计，在 GC 期间被刷新
+	local_largefree  uintptr                  // bytes freed for large objects (>maxsmallsize)
+	local_nlargefree uintptr                  // number of frees for large objects (>maxsmallsize)
+	local_nsmallfree [_NumSizeClasses]uintptr // number of frees for small objects (<=maxsmallsize)
+
+	// flushGen indicates the sweepgen during which this mcache
+	// was last flushed. If flushGen != mheap_.sweepgen, the spans
+	// in this mcache are stale and need to the flushed so they
+	// can be swept. This is done in acquirep.
+	flushGen uint32
+}
+```
+运行时的 runtime.allocmcache 从 mheap 上分配一个 mcache。 由于 mheap 是全局的，因此在分配期必须对其进行加锁，而分配通过 fixAlloc 组件完成：
+
+```go
+// 虚拟的MSpan，不包含任何对象。
+var emptymspan mspan
+
+func allocmcache() *mcache {
+	var c *mcache
+	systemstack(func() {
+		lock(&mheap_.lock)
+		c = (*mcache)(mheap_.cachealloc.alloc())
+		c.flushGen = mheap_.sweepgen
+		unlock(&mheap_.lock)
+	}
+	for i := range c.alloc {
+		c.alloc[i] = &emptymspan // 暂时指向虚拟的 mspan 中
+	}
+	// 返回下一个采样点，是服从泊松过程的随机数
+	c.next_sample = nextSample()
+	return c
+}
+```
+由于 mcache 从非 GC 内存上进行分配，因此出现的任何堆指针都必须进行特殊处理。 所以在释放前，需要调用 mcache.releaseAll 将堆指针进行处理.
+
+
+- mcache 会被 P 持有，当 M 和 P 绑定时，M 同样会保留 mcache 的指针
+- mcache 直接向操作系统申请内存，且常驻运行时
+- P 通过 make 命令进行分配，会分配在 Go 堆上
+
 
 **mcentral**
 
