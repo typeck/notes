@@ -1,3 +1,5 @@
+## opentracing
+[实战](https://zhuanlan.zhihu.com/p/170290448)
 ## jaeger组件介绍：
 
 jaeger-client：jaeger 的客户端，实现了opentracing协议；
