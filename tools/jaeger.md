@@ -67,6 +67,21 @@ chmod -R 777 /mydata/elasticsearch
 
 `curl 'http://localhost:9200'`
 
+### （扩展 kibana）
+kibana 版本需要和es版本匹配
+```sh
+vim /data/elk/kibana.yml
+```
+```
+server.name: kibana
+server.host: "0"
+elasticsearch.hosts: [ "http://172.27.122.2:9200" ]
+xpack.monitoring.ui.container.elasticsearch.enabled: true
+```
+```sh
+docker run -d --restart=always --log-driver json-file --log-opt max-size=100m --log-opt max-file=2 --name xinyar-kibana -p 5601:5601 -v /data/elk/kibana.yml:/usr/share/kibana/config/kibana.yml docker.elastic.co/kibana/kibana:7.4.2
+```
+
 ### jaeger 安装
 ```sh
 docker run -d --rm -p 14268:14268 -p 14269:14269 -e SPAN_STORAGE_TYPE=elasticsearch -e ES_SERVER_URLS=http://172.27.122.2:9200 jaegertracing/jaeger-collector:1.14
