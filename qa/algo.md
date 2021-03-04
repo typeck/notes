@@ -7,8 +7,8 @@ void quick_sort(vector<int>& nums, int l, int r) {
     if (r - l < 2) {
         return;
     }
-    // 在[l, h - 1]区间中构造轴心；（算法核心）
-    int pivot = partition(nums, l, h - 1);
+    // 在[l, r - 1]区间中构造轴心；（算法核心）
+    int pivot = partition(nums, l, r - 1);
     //分别对两个区间进行快排
     quick_sort(nums, l, pivot);
     quick_sort(nums, pivot + 1, h);
@@ -31,6 +31,7 @@ void partition(vector<int>& nums, int l, int r) {
         nums[last] = nums[fist];
     }
     // 最终first == last； （轴心）
+    nums[first] = key;
     return first;
 }
 ```
@@ -129,3 +130,10 @@ void bubble_sort(vector<int>&nums, int n) {
 - 复杂度： O(n平方)
 
 - 稳定性： 稳定;
+
+# todo 
+桶排序（top k频次），堆排序（top k 大小）
+
+# 如何在有限的内存限制下实现数十亿级手机号码去重（bitmap）
+
+https://www.jianshu.com/p/b39eb55d4670?utm_campaign=maleskine&utm_content=note&utm_medium=seo_notes&utm_source=recommendation

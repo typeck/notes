@@ -1,0 +1,30 @@
+
+{
+    "version": "2.0.0",
+    "tasks": [{
+        "label": "Compile", 
+        "command": "g++",   
+        "args": [
+            "${file}",
+            "-o",    
+            "${workspaceFolder}/a.out",
+            "-g",    
+            "-m64", 
+            "-Wall",
+            "-static-libgcc",     
+            "-fexec-charset=GBK", 
+            "-std=c++14"
+        ], 
+        "type": "process", 
+        "group": {
+            "kind": "build",
+            "isDefault": true 
+        },
+        "presentation": {
+            "echo": true,
+            "reveal": "always", 
+            "focus": false,     
+            "panel": "shared"   
+        }
+    }]
+}

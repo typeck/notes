@@ -1,3 +1,5 @@
+# Redis 5 种基础数据结构
+分别为：string (字符串)、list (列表)、set (集合)、hash (哈希) 和 zset (有序集合)。
 ## 简单动态字符串(simple dynamic string，SDS)
 C 语言使用长度为 N+1 的字符数组来表示长度为 N 的字符串， 并且字符数组的最后一个元素总是空字符 '\0' 。
 数据结构：
@@ -82,7 +84,59 @@ typedef struct list {
     unsigned long len;
 } list;
 ```
-## map
+Redis 的列表结构常用来做异步队列使用。将需要延后处理的任务结构体序列化成字符串塞进 Redis 的列表，另一个线程从这个列表中轮询数据进行处理。
+
+**右边进左边出：队列**
+```
+> rpush books python java golang
+(integer) 3
+> llen books
+(integer) 3
+> lpop books
+"python"
+> lpop books
+"java"
+> lpop books
+"golang"
+> lpop books
+(nil) 
+```
+**右边进右边出：栈**
+```
+> rpush books python java golang
+(integer) 3
+> rpop books
+"golang"
+> rpop books
+"java"
+> rpop books
+"python"
+> rpop books 
+```
+
+```shell
+> rpush books python java golang
+(integer) 3
+> lindex books 1 # O(n) 慎用
+"java"
+> lrange books 0 -1 # 获取所有元素，O(n) 慎用
+1) "python"
+2) "java"
+3) "golang"
+> ltrim books 1 -1 # O(n) 慎用
+OK
+> lrange books 0 -1
+1) "java"
+2) "golang"
+# ltrim 跟的两个参数 start_index 和 end_index 定义了一个区间，在这个区间内的值，ltrim 要保留，区间之外统统砍掉。
+> ltrim books 1 0 # 这其实是清空了整个列表，因为区间范围长度为负
+OK
+> llen books
+(integer) 0
+
+```
+
+## map(字典)
 哈希表结构：
 ```c
 typedef struct dictht {
@@ -359,3 +413,179 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
     return x;
 }
 ```
+## set(集合)
+
+Redis 的集合相当于 Java 语言里面的 HashSet，它内部的键值对是无序的唯一的。
+
+当集合中最后一个元素移除之后，数据结构自动删除，内存被回收。 set 结构可以用来
+存储活动中奖的用户 ID，因为有去重功能，可以保证同一个用户不会中奖两次。
+
+```shell
+> sadd books python
+(integer) 1
+> sadd bookspython # 重复
+(integer) 0
+> sadd books java golang
+(integer) 2
+> smembers books # 注意顺序，和插入的并不一致，因为 set 是无序的
+1) "java"
+2) "python"
+3) "golang"
+> sismember books java # 查询某个 value 是否存在，相当于 contains(o)
+(integer) 1
+> sismember books rust
+(integer) 0
+> scard books # 获取长度相当于 count()
+(integer) 3
+> spop books # 弹出一个
+"java" 
+```
+## zset
+
+一方面它是一个 set，保证了内部value 的唯一性，另一方面它可以给每个 value 赋予一个 score，代表这个 value 的排序权重。它的内部实现用的是一种叫着「跳跃列表」的数据结构。
+
+zset 可以用来存粉丝列表，value 值是粉丝的用户 ID，score 是关注时间。我们可以对粉丝列表按关注时间进行排序。
+
+```bash
+> zadd books 9.0 "think in java"
+(integer) 1
+> zadd books 8.9 "java concurrency"
+(integer) 1
+> zadd books 8.6 "java cookbook"
+(integer) 1
+> zrange books 0 -1 # 按 score 排序列出，参数区间为排名范围
+1) "java cookbook"
+2) "java concurrency"
+3) "think in java"
+> zrevrange books 0 -1 # 按 score 逆序列出，参数区间为排名范围
+1) "think in java"
+2) "java concurrency"
+3) "java cookbook"
+> zcard books # 相当于 count()
+(integer) 3
+> zscore books "java concurrency" # 获取指定 value 的 score
+"8.9000000000000004" # 内部 score 使用 double 类型进行存储，所以存在小数点精度问题
+> zrank books "java concurrency" # 排名
+(integer) 1
+> zrangebyscore books 0 8.91 # 根据分值区间遍历 zset
+1) "java cookbook"
+2) "java concurrency"
+> zrangebyscore books -inf 8.91 withscores # 根据分值区间 (-∞, 8.91] 遍历 zset，同时返
+回分值。inf 代表 infinite，无穷大的意思。
+1) "java cookbook"
+2) "8.5999999999999996"
+3) "java concurrency"
+4) "8.9000000000000004"
+> zrem books "java concurrency" # 删除 value
+(integer) 1
+> zrange books 0 -1
+1) "java cookbook"
+2) "think in java" 
+```
+## 分布式锁
+
+` set lock:codehole true ex 5 nx`
+
+Redis 的分布式锁不能解决超时问题，如果在加锁和释放锁之间的逻辑执行的太长，以至于超出了锁的超时限制，就会出现问题。因为这时候锁过期了，第二个线程重新持有了这把锁，但是紧接着第一个线程执行完了业务逻辑，就把锁给释放了，第三个线程就会在第二个线程逻辑执行完之间拿到了锁。
+
+为了避免这个问题，Redis 分布式锁不要用于较长时间的任务.
+
+有一个更加安全的方案是为 set 指令的 value 参数设置为一个随机数，释放锁时先匹配随机数是否一致，然后再删除 key。但是匹配 value 和删除 key 不是一个原子操作，Redis 也没有提供类似于 delifequals 这样的指令，这就需要使用 Lua 脚本来处理了，因为 Lua 脚本可以保证连续多个指令的原子性执行。
+```lua
+# delifequals
+if redis.call("get",KEYS[1]) == ARGV[1] then
+return redis.call("del",KEYS[1])
+else
+ return 0
+end
+```
+
+## 消息队列
+
+Redis 的 list(列表) 数据结构常用来作为异步消息队列使用，使用rpush/lpush操作入队列，使用 lpop 和 rpop 来出队列。
+
+客户端是通过队列的 pop 操作来获取消息，然后进行处理。处理完了再接着获取消息，再进行处理。如此循环往复，这便是作为队列消费者的客户端的生命周期。
+
+可是如果队列空了，客户端就会陷入 pop 的死循环，不停地 pop，没有数据，接着再 pop，又没有数据。这就是浪费生命的空轮询。空轮询不但拉高了客户端的 CPU，redis 的 QPS 也会被拉高，如果这样空轮询的客户端有几十来个，Redis 的慢查询可能会显著增多。
+
+解决办法，使用阻塞读：blpop/brpop。(实现：redis在blpop命令处理过程时，首先会去查找key对应的list，如果存在，则pop出数据响应给客户端。否则将对应的key push到blocking_keys数据结构当中，对应的value是被阻塞的client。当下次push命令发出时，服务器检查blocking_keys当中是否存在对应的key，如果存在，则将key添加到ready_keys链表当中，同时将value插入链表当中并响应客户端。)
+阻塞读在队列没有数据的时候，会立即进入休眠状态，一旦数据到来，则立刻醒过来。消息的延迟几乎为零。用 blpop/brpop 替代前面的 lpop/rpop，就完美解决了上面的问题。
+```redis
+BLPOP LIST1 LIST2 .. LISTN TIMEOUT
+```
+![](img/742E8A65-0177-4f3c-98D6-028B0C3B5FCC.png)
+
+如果线程一直阻塞在哪里，Redis 的客户端连接就成了闲置连接，闲置过久，服务器一般会主动断开连接，减少闲置资源占用。这个时候 blpop/brpop 会抛出异常来。所以编写客户端消费者的时候要小心，注意捕获异常，还要重试。
+
+延时队列可以通过 Redis 的 zset(有序列表) 来实现。我们将消息序列化成一个字符串作为 zset 的 value，这个消息到期处理时间作为 score，然后用多个线程轮询 zset 获取到期的任务进行处理，多个线程是为了保障可用性，万一挂了一个线程还有其它线程可以继续处理。因为有多个线程，所以需要考虑并发争抢任务，确保任务不能被多次执行。
+
+## HyperLogLog
+
+Redis 提供了 HyperLogLog 数据结构就是用来解决这种统计问题的。HyperLogLog 提供不精确的去重计数方案，虽然不精确但是也不是非常不精确，标准误差是 0.81%，这样的精确度已经可以满足上面的 UV 统计需求了。
+
+HyperLogLog 提供了两个指令 pfadd 和 pfcount，根据字面意义很好理解，一个是增加计数，一个是获取计数。pfadd 用法和 set 集合的 sadd 是一样的，来一个用户 ID，就将用户 ID 塞进去就是。pfcount 和 scard 用法是一样的，直接获取计数值。
+
+## 布隆过滤器
+
+布隆过滤器可以理解为一个不怎么精确的 set 结构，当你使用它的 contains 方法判断某个对象是否存在时，它可能会误判。但是布隆过滤器也不是特别不精确，只要参数设置的合理，它的精确度可以控制的相对足够精确，只会有小小的误判概率。
+
+布隆过滤器有二个基本指令，bf.add 添加元素，bf.exists 查询元素是否存在，它的用法和 set 集合的 sadd 和 sismember 差不多。注意 bf.add 只能一次添加一个元素，如果想要一次添加多个，就需要用到 bf.madd 指令。同样如果需要一次查询多个元素是否存在，就需要用到 bf.mexists 指令。
+
+每个布隆过滤器对应到 Redis 的数据结构里面就是一个大型的位数组和几个不一样的无偏 hash 函数。所谓无偏就是能够把元素的 hash 值算得比较均匀。
+
+向布隆过滤器中添加 key 时，会使用多个 hash 函数对 key 进行 hash 算得一个整数索引值然后对位数组长度进行取模运算得到一个位置，每个 hash 函数都会算得一个不同的位置。再把位数组的这几个位置都置为 1 就完成了 add 操作。
+
+向布隆过滤器询问 key 是否存在时，跟 add 一样，也会把 hash 的几个位置都算出来，看看位数组中这几个位置是否都位 1，只要有一个位为 0，那么说明布隆过滤器中这个key 不存在。如果都是 1，这并不能说明这个 key 就一定存在，只是极有可能存在，因为这些位被置为 1 可能是因为其它的 key 存在所致。如果这个位数组比较稀疏，这个概率就会
+很大，如果这个位数组比较拥挤，这个概率就会降低。
+
+布隆过滤器在 NoSQL 数据库领域使用非常广泛，我们平时用到的 HBase、Cassandra还有 LevelDB、RocksDB 内部都有布隆过滤器结构，布隆过滤器可以显著降低数据库的 IO请求数量。当用户来查询某个 row 时，可以先通过内存中的布隆过滤器过滤掉大量不存在的row 请求，然后再去磁盘进行查询。
+
+## 限流
+
+看一个常见 的简单的限流策略。系统要限定用户的某个行为在指定的时间里只能允许发生 N 次。
+
+用一个 zset 结构记录用户的行为历史，每一个行为都会作为 zset 中的一个key 保存下来。**同一个用户同一种行为用一个 zset 记录。**
+
+```python
+# coding: utf8
+import time
+import redis
+client = redis.StrictRedis()
+def is_action_allowed(user_id, action_key, period, max_count):
+ key = 'hist:%s:%s' % (user_id, action_key)
+ now_ts = int(time.time() * 1000) # 毫秒时间戳
+ with client.pipeline() as pipe: # client 是 StrictRedis 实例
+ # 记录行为
+ pipe.zadd(key, now_ts, now_ts) # value 和 score 都使用毫秒时间戳
+ # 移除时间窗口之前的行为记录，剩下的都是时间窗口内的
+ pipe.zremrangebyscore(key, 0, now_ts - period * 1000)
+ # 获取窗口内的行为数量
+ pipe.zcard(key)
+
+ # 设置 zset 过期时间，避免冷用户持续占用内存
+ # 过期时间应该等于时间窗口的长度，再多宽限 1s
+ pipe.expire(key, period + 1)
+ # 批量执行
+ _, _, current_count, _ = pipe.execute()
+ # 比较数量是否超标
+ return current_count <= max_count
+for i in range(20):
+print is_action_allowed("laoqian", "reply", 60, 5)
+```
+每一个行为到来时，都维护一次时间窗口。将时间窗口外的记录全部清理掉，只保留窗口内的记录。
+
+因为这几个连续的 Redis 操作都是针对同一个 key 的，使用 pipeline 可以显著提升Redis 存取效率。但这种方案也有缺点，因为它要记录时间窗口内所有的行为记录，如果这个量很大，比如限定 60s 内操作不得超过 100w 次这样的参数，它是不适合做这样的限流的，因为会消耗大量的存储空间。
+
+## 漏斗限流
+
+漏斗限流是最常用的限流方法之一。
+
+在计数器算法中我们看到,当使用了所有的访问量后,接口会完全处于不可用状态.有些系统不喜欢这样的处理方式,可以选择漏斗算法进行限流. 漏斗算法的原理就像名字,是一个漏斗,访问量从漏斗的大口进入,从漏斗的小口进入系统.这样不管是多大的访问量进入漏斗,最后进入系统的访问量都是固定的.漏斗的好处就是,大批量访问进入时,漏斗有容量,不超过容量(容量的设计=固定处理的访问量*可接受等待时长)的数据都可以排队等待处理,超过的才会丢弃.
+
+## scan
+
+scan 参数提供了三个参数，第一个是 cursor 整数值，第二个是 key 的正则模式，第三个是遍历的 limit hint（是限定服务器单次遍历的字典槽位数量(约等于)）。
+
+第一次遍历时，cursor 值为 0，然后将返回结果中第一个整数值作为下一次遍历的 cursor。一直遍历到返回的 cursor 值为 0 时结束。
+
+
