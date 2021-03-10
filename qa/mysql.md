@@ -35,3 +35,61 @@ MySQL默认的复制即是异步的，主库在执行完客户端提交的事务
 - 打开 MySQL 支持的并行复制，多个库并行复制。如果说某个库的写入并发就是特别高，单库写并发达到了 2000/s，并行复制还是没意义。
 - 重写代码，写代码的同学，要慎重，插入数据时立马查询可能查不到。
 - 如果确实是存在必须先插入，立马要求就查询到，然后立马就要反过来执行一些操作，对这个查询设置直连主库。不推荐这种方法，你这么搞导致读写分离的意义就丧失了。
+
+## Insert On duplicate key update 
+
+```sql
+INSERT INTO `campaign_infos_copy2` (`created_at`,`updated_at`,`deleted_at`,`create_by`,`update_by`,`campaign_id`,`campaign_name`,`daily_cap`,`target_type`,`promotion_brand`,`geo`,`stdt`,`eddt`,`campaign_status`,`gp_link`,`price_data`,`responsible_am`,`responsible_sales`,`status`) VALUES ("2021-03-05 00:15:00.184","2021-03-05 00:15:00.184",NULL,0,0,"CA00000002184","FarmHeroesSaga_Global_CPI_20210302","59","Purchase","com.king.farmheroessaga","Global","2021-03-02","2025-03-31","Closed","https://play.google.com/store/apps/details?id=com.king.farmheroessaga","https://www.baidu.com","Sean Meng","John Pryor",1),
+
+("2021-03-05 00:15:00.184","2021-03-05 00:15:00.184",NULL,0,0,"CA00000002173","EASYJOY-InstaMoney_IN_CPA_20210126","50","Install_Gaid","com.innofinsolutions.instamoney","IN","2021-01-27","2022-01-27","Launch","https://play.google.com/store/apps/details?id=com.innofinsolutions.instamoney","https://www.baidu.com","Matt Ma","Cynthia Chen",1)
+
+ON DUPLICATE KEY UPDATE 
+
+`updated_at`=VALUES(`updated_at`),
+
+`deleted_at`=VALUES(`deleted_at`),
+
+`create_by`=VALUES(`create_by`),
+
+`update_by`=VALUES(`update_by`),
+
+`campaign_id`=VALUES(`campaign_id`),
+
+`campaign_name`=VALUES(`campaign_name`),
+
+`daily_cap`=VALUES(`daily_cap`),
+
+`target_type`=VALUES(`target_type`),
+
+`promotion_brand`=VALUES(`promotion_brand`),
+
+`geo`=VALUES(`geo`),
+
+`stdt`=VALUES(`stdt`),
+
+`eddt`=VALUES(`eddt`),
+
+`campaign_status`=VALUES(`campaign_status`),
+
+`gp_link`=VALUES(`gp_link`),
+
+`price_data`=VALUES(`price_data`),
+
+`responsible_am`=VALUES(`responsible_am`),
+
+`responsible_sales`=VALUES(`responsible_sales`),
+
+`status`=VALUES(`status`)    
+```
+
+- 更新的内容中unique key或者primary key最好保证一个，不然不能保证语句执行正确(有任意一个unique key重复就会走更新,当然如果更新的语句中在表中也有重复校验的字段，那么也不会更新成功而导致报错,只有当该条语句没有任何一个unique key重复才会插入新记录)；尽量不对存在多个唯一键的table使用该语句，避免可能导致数据错乱。
+- 在有可能有并发事务执行的insert 语句情况下不使用该语句，可能导致产生death lock。
+  
+  insert ... on duplicate key 在执行时，innodb引擎会先判断插入的行是否产生重复key错误，如果存在，在对该现有的行加上S（共享锁）锁，如果返回该行数据给mysql,然后mysql执行完duplicate后的update操作，然后对该记录加上X（排他锁），最后进行update写入。
+
+  如果有两个事务并发的执行同样的语句，那么就会产生death lock，如：
+  ![](img/1401949-20191025133624343-1194346486.png)
+
+- 如果数据表id是自动递增的不建议使用该语句；id不连续，如果前面更新的比较多，新增的下一条会相应跳跃的更大。
+  [解决办法](https://blog.csdn.net/eleanoryss/article/details/82997899)
+- 该语句是mysql独有的语法，如果可能会设计到其他数据库语言跨库要谨慎使用。
