@@ -83,4 +83,136 @@ func main() {
 	return
 }
 ```
+## golang 内存分配
 
+go的内存分配器基于 tcmalloc（thread-cache malloc）（tcmalloc 为每个线程实现了一个本地缓存， 区分了小对象（小于 32kb）和大对象分配两种分配类型，其管理的内存单元称为 span。）
+
+Go 的内存分配器与 tcmalloc 存在一定差异。 这个差异来源于 Go 语言被设计为没有显式的内存分配与释放， 完全依靠编译器与运行时的配合来自动处理，因此也就造就了内存分配器、垃圾回收器两大组件。
+
+Go 堆被视为由多个 arena 组成，每个 arena 在 64 位机器上为 64MB
+
+所有的堆对象都通过 span 按照预先设定好的 大小等级分别分配，小于 32KB 的小对象则分配在固定大小等级的 span 上，否则直接从 mheap 上进行分配。
+
+**mspan 是相同大小等级的 span 的双向链表的一个节点，每个节点还记录了自己的起始地址、 指向的 span 中页的数量。**
+```go
+//go:notinheap
+type mspan struct { // 双向链表
+	next *mspan     // 链表中的下一个 span，如果为空则为 nil
+	prev *mspan     // 链表中的前一个 span，如果为空则为 nil
+	...
+	startAddr      uintptr // span 的第一个字节的地址，即 s.base()
+	npages         uintptr // 一个 span 中的 page 数量
+	manualFreeList gclinkptr // mSpanManual span 的释放对象链表
+	...
+	freeindex  uintptr
+	nelems     uintptr // span 中对象的数量
+	allocCache uint64
+	allocBits  *gcBits
+	...
+	allocCount  uint16     // 分配对象的数量
+	spanclass   spanClass  // 大小等级与 noscan (uint8)
+	incache     bool       // 是否被 mcache 使用
+	state       mSpanState // mspaninuse 等等信息
+	...
+}
+```
+mspan其实就是一个内存分单位的列表（固定大小），span 的列表按所存储 object 的大小分成至多 67 个等级，其容量从 8 字节到 32 KiB（32,768 字节）
+
+mcache
+是一个 per-P 的缓存，它是一个包含不同大小等级的 span 链表的数组，其中 mcache.alloc 的每一个数组元素 都是某一个特定大小的 mspan 的链表头指针。
+```go
+//go:notinheap
+type mcache struct {
+	...
+	tiny             uintptr
+	tinyoffset       uintptr
+	local_tinyallocs uintptr
+	alloc            [numSpanClasses]*mspan // 用来分配的 spans，由 spanClass 索引
+	stackcache       [_NumStackOrders]stackfreelist
+	...
+}
+```
+mcache中存储着不同大小的span列表（mspan）
+![](img/v2-6a6060eb94aa7124d34dfa5c1fec5310_720w.jpeg)
+
+**每种 object 大小相同 span 出现两次：其中一次包含指针的 object，另一次不包含。这种分流处理使得垃圾回收器 GC 工作更轻松，因为扫描时可以跳过不包含指针的 object。**所以数组大小numSpanClasses为67x2=134 
+
+当 mcache 中 span 的数量不够使用时，会向 mcentral 的 nonempty 列表中获得新的 span。
+
+```go
+//go:notinheap
+type mcentral struct {
+	lock      mutex
+	spanclass spanClass
+	nonempty  mSpanList // 带有自由对象的 span 列表，即非空闲列表
+	empty     mSpanList // 没有自由对象的 span 列表（或缓存在 mcache 中）
+	...
+}
+```
+![](img/v2-fff00474b4107ce4e142a0ee0f95e52d_720w.jpeg)
+mcentral 维护 span 为结点的双向链表，非空 span 结点包含至少一个 object 使用的链表，当 GC 扫描内存时，会清空被标记为使用完毕的 span，并将其加入非空链表中。
+
+当本地缓存的 span 用完时，Go 语言会请求从 mcentral 获取一个新的 span，追加至本地链表中：
+![](img/v2-b2fccd8698e4cfac9c6711794885407b_720w.jpeg)
+
+当 mcentral 中 nonempty 列表中也没有可分配的 span 时，则会向 mheap 提出请求，从而获得 新的 span，并进而交给 mcache。
+```go
+//go:notinheap
+type mheap struct {
+	lock           mutex
+	pages          pageAlloc
+	...
+	allspans       []*mspan // 所有 spans 从这里分配出去
+	scavengeGoal   uint64
+	reclaimIndex   uint64
+	reclaimCredit  uintptr
+	arenas         [1 << arenaL1Bits]*[1 << arenaL2Bits]*heapArena
+	heapArenaAlloc linearAlloc
+	arenaHints     *arenaHint
+	arena          linearAlloc
+	allArenas      []arenaIdx
+	curArena       struct {
+		base, end uintptr
+	}
+	central       [numSpanClasses]struct {
+		mcentral mcentral
+		pad      [cpu.CacheLinePadSize - unsafe.Sizeof(mcentral{})%cpu.CacheLinePadSize]byte
+	}
+	...
+
+	// 各种分配器
+	spanalloc             fixalloc // span* 分配器
+	cachealloc            fixalloc // mcache* 分配器
+	treapalloc            fixalloc // treapNodes* 分配器，用于大对象
+	specialfinalizeralloc fixalloc // specialfinalizer* 分配器
+	specialprofilealloc   fixalloc // specialprofile* 分配器
+	speciallock           mutex    // 特殊记录分配器的锁
+	arenaHintAlloc        fixalloc // arenaHints 分配器
+	...
+}
+```
+再当 mcentral 没有可用的内存供 span 分配时，Go 语言再透过 OS 从 heap 中申请新的内存并加入 mcentral 的链表中：
+![](img/v2-e6967e7b6a5bb838aa47b048789c8042_720w.jpeg)
+
+页是向操作系统申请的最小单位，默认8k；
+
+如果向 OS 申请的内存过多，heap 还会分配一块足够大的连续内存 arena，对于 64 位处理器的 OS 而言，起步价为 64 MB。
+arena 同时映射每一个 span，其数据结构为：
+```go
+const (
+	pageSize             = 8192                       // 8KB
+	heapArenaBytes       = 67108864                   // 64MB
+	heapArenaBitmapBytes = heapArenaBytes / 32        // 2097152 （heapArenaBytes / 8 * 2 / 8)(两位表示一个指针对象)
+	pagesPerArena        = heapArenaBytes / pageSize  // 8192
+)
+
+//go:notinheap
+type heapArena struct {
+	bitmap     [heapArenaBitmapBytes]byte
+	spans      [pagesPerArena]*mspan
+	pageInUse  [pagesPerArena / 8]uint8
+	pageMarks  [pagesPerArena / 8]uint8
+	zeroedBase uintptr
+}
+```
+我们使用 -gcflags "-N -l -m" 编译这段代码能够禁用编译器与内联优化并进行逃逸分析

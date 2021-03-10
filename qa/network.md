@@ -1,3 +1,78 @@
+# HTTP 状态码
+- 1XX 信息性状态码，1XX系列响应代码仅在与HTTP服务器沟通时使用。
+- 2XX 成功状态码
+  - 201	Created（已创建）
+  - 202	Accepted（已接受）
+  - 204	No Content(没有内容)
+- 3XX 重定向状态码
+  - 301	Moved Permanently（永久移除)
+  - 302	Found（已找到）
+  - 307	Temporary Redirect（临时重定向
+- 4XX客户端错误状态码
+  - 400	Bad Request（坏请求）	告诉客户端，它发送了一个错误的请求。
+  - 401	Unauthorized（未授权）	需要客户端对自己认证
+  - 403	Forbidden（禁止）	请求被服务器拒绝
+- 5XX服务器错误状态码
+  - 500	Internal Server Error(内部服务器错误)
+  - 501	Not Implemented（未实现）
+  - 502	Bad Gateway（网关故障）
+  - 503	Service Unavailable（未提供此服务）
+  - 504	Gateway Timeout（网关超时）
+  - 505	HTTP Version Not Supported（不支持的HTTP版本）
+
+# http报文格式
+![](./img/20170330192653242.png)
+![](./img/20170330192754102.png)
+
+```
+POST /index.html HTTP/1.1
+HOST: www.XXX.com
+User-Agent: Mozilla/5.0(Windows NT 6.1;rv:15.0) Firefox/15.0
+
+Username=admin&password=admin
+```
+```
+HTTP/1.1 200 OK
+Content-Encoding: gzip
+Content-Type: text/html;charset=utf-8
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Document</title>
+</head>
+<body>
+    <p>this is http response</p>
+</body>
+</html>
+```
+
+# GET POST 区别
+
+GET
+
+“读取“一个资源。比如Get到一个html文件。反复读取不应该对访问的数据有副作用。
+
+POST
+
+在页面里<form> 标签会定义一个表单。点击其中的submit元素会发出一个POST请求让服务器做一件事。这件事往往是有副作用的，不幂等的。
+
+GET请求没有body，只有url，请求数据放在url的querystring中；POST请求的数据在body中“。但这种情况仅限于浏览器发请求的场景。
+
+REST中GET和POST不是随便用的。在REST中, 【GET】 + 【资源定位符】被专用于获取资源或者资源列表。
+
+REST 【POST】+ 【资源定位符】则用于“创建一个资源”
+
+REST POST和REST PUT的区别。有些api是使用PUT作为创建资源的Method。PUT与POST的区别在于，PUT的实际语义是“replace”replace。REST规范里提到PUT的请求体应该是完整的资源，包括id在内。
+
+### 关于安全性
+
+我们常听到GET不如POST安全，因为POST用body传输数据，而GET用url传输，更加容易看到。但是从攻击的角度，无论是GET还是POST都不够安全，因为HTTP本身是明文协议。每个HTTP请求和返回的每个byte都会在网络上明文传播，不管是url，header还是body。这完全不是一个“是否容易在浏览器地址栏上看到“的问题。为了避免传输中数据被窃取，必须做从客户端到服务器的端端加密。业界的通行做法就是https——即用SSL协议协商出的密钥加密明文的http数据。这个加密的协议和HTTP协议本身相互独立。如果是利用HTTP开发公网的站点/App，要保证安全，https是最最基本的要求。
+
+[参考](https://www.zhihu.com/question/28586791)
+
+
 # 如何理解 HTTP 协议是无状态的
 
 HTTP 协议是无状态的，指的是协议对于事务处理没有记忆能力，服务器不知道客户端是什么状态。也就是说，打开一个服务器上的网页和上一次打开这个服务器上的网页之间没有任何联系。HTTP 是一个无状态的面向连接的协议，无状态不代表 HTTP 不能保持 TCP 连接，更不能代表 HTTP 使用的是 UDP 协议（无连接协议）。
