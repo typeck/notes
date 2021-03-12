@@ -154,3 +154,54 @@ TIME_WAIT是TCP协议用以保证被重新分配的socket不会受到之前残�
 
 
   
+# linux 网络模型
+
+五种IO的模型：阻塞IO、非阻塞IO、多路复用IO、信号驱动IO和异步IO；前四种都是同步IO，在内核数据copy到用户空间时都是阻塞的。
+
+## io多路复用
+IO多路复用是一种同步IO模型，实现一个线程可以监视多个文件句柄；一旦某个文件句柄就绪，就能够通知应用程序进行相应的读写操作；没有文件句柄就绪时会阻塞应用程序，交出cpu。多路是指网络连接，复用指的是同一个线程。
+
+文件描述符在形式上是一个非负整数。实际上，它是一个索引值，指向内核为每一个进程所维护的该进程打开文件的记录表。
+
+当创建进程时,通常默认会有3个文件描述符(0,1,2),0代表标准输入，1代表标准输出，2代表标准错误，它们统称为标准IO，所以如果进程通过open打开一个文件的时候，文件描述符会从3开始，fd的值其实就是进程中打开文件列表的下标索引
+
+由于文件描述符在一个进程中是特有的,因此不能在多个进程中间实现共享,而唯一的例外是在父/子进程之间,当一个进程调用fork时,调用fork时打开的所有文件在子进程和父进程中仍然是打开的,而且子进程写入文件描述符会影响到父进程的同一文件描述符,反之亦然
+
+### epoll
+```c
+int epoll_create(int size);
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout);
+```
+
+- 用 epoll_create 创建 epoll 的描述符;
+  内核会产生一个epoll 实例数据结构并返回一个文件描述符，这个特殊的描述符就是epoll实例的句柄，后面的两个接口都以它为中心。
+
+- 用 epoll_ctl 将一个个需要监听的描述符以及监听的事件类型用 epoll_ctl 注册在 epoll 描述符上；
+  将被监听的描述符添加到红黑树或从红黑树中删除或者对监听事件进行修改。
+
+- 执行 epoll_wait 等着被监听的描述符 Ready，epoll_wait 返回后遍历 Ready 的描述符，根据 Ready 的事件类型处理事件；
+  处于ready状态的那些文件描述符会被复制进ready list中，epoll_wait用于向用户进程返回ready list。
+- 如果某个被监听的描述符不再需要了，需要用 epoll_ctl 将它与 epoll 的描述符解绑
+- 当 epoll 描述符不再需要时需要主动 close，像关闭一个文件一样释放资源
+
+Epoll 有两种触发模式，一种叫 Eage Trigger 简称 ET，一种叫 Level Trigger 简称 LT。每一个使用 epoll_ctl 注册在 epoll 描述符上的被监听的描述符都能单独配置自己的触发模式。
+
+对于这两种触发模式的区别从使用的角度上来说，ET 模式下当一个 FD (文件描述符) Ready 后，需要以 Non-Blocking 方式一直操作这个 FD 直到操作返回 EAGAIN 错误为止，期间 Ready 这个事件只会触发 epoll_wait 一次返回。而如果是 LT 模式，如果 FD 上的事件一直处在 Ready 状态没处理完，则每次调用 epoll_wait 都会立即返回。
+
+每一个epoll对象都有一个独立的eventpoll结构体，用于存放通过epoll_ctl方法向epoll对象中添加进来的事件。这些事件都会挂载在红黑树中，如此，重复添加的事件就可以通过红黑树而高效的识别出来(红黑树的插入时间效率是lgn，其中n为树的高度)。
+
+而所有添加到epoll中的事件都会与设备(网卡)驱动程序建立回调关系，也就是说，当相应的事件发生时会调用这个回调方法。这个回调方法在内核中叫ep_poll_callback,它会将发生的事件添加到rdlist双链表中。
+
+在epoll中，对于每一个事件，都会建立一个epitem结构体，当调用epoll_wait检查是否有事件发生时，只需要检查eventpoll对象中的rdlist双链表中是否有epitem元素即可。如果rdlist不为空，则把发生的事件复制到用户态，同时将事件数量返回给用户。
+
+
+[参考](https://zhuanlan.zhihu.com/p/127148459)
+
+## reactor模式
+Reactor模式首先是事件驱动的，有一个或多个并发输入源，有一个Service Handler，有多个Request Handlers；Service Handler会对输入的请求（Event）进行多路复用，并同步地将它们分发给相应的Request Handler。
+
+Reactor实现相对简单，对于链接多，但耗时短的处理场景高效； 
+- 操作系统可以在多个事件源上等待，并且避免了线程切换的性能开销和编程复杂性；
+- 事件的串行化对应用是透明的，可以顺序的同步执行而不需要加锁；
+- 事务分离：将与应用无关的多路复用、分配机制和与应用相关的回调函数分离开来。
