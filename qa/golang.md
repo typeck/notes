@@ -425,3 +425,46 @@ goroutine在栈上运行着，当用光栈空间，它遇到与旧方案中相�
 此外，当栈再次增长时，运行时也无需做任何事情，我们只需要重用之前分配的空闲空间即可。
 
 [参考](https://www.cnblogs.com/mafeng/p/10305419.html)
+
+# go build
+
+Go语言提供的build tag 条件编译特性，顾名思义，只有在特定条件下才会构建对应的代码。
+
+比如下面的源文件只有在设置debug构建标志时才会被构建：
+```go
+// +build debug
+
+package main
+
+var buildMode = "debug"
+```
+可以用以下命令构建：
+```
+go build -tags="debug"
+```
+- 构建约束以一行+build开始的注释。在+build之后列出了一些条件，在这些条件成立时，该文件应包含在编译的包中；
+- 约束可以出现在任何源文件中，不限于go文件；
+- +build必须出现在package语句之前，+build注释之后应要有一个空行。
+- 多个条件之间，空格表示OR；逗号表示AND；叹号(!)表示NOT
+- 一个文件可以有多个+build，它们之间的关系是AND。
+
+tags 应用场景：
+
+不同环境下编译不同的文件，实现版本控制 、 环境配置控制等。
+
+go build还支持通过命令行传递编译参数，通过-ldflags参数实现，将main.go修改为
+```go
+package main
+
+import "fmt"
+
+// HINT: You might need to move this declaration to a different file.
+var version string
+
+func main() {
+	fmt.Printf("running %s version", version)
+}
+```
+```
+ go build -ldflags '-X main.version="dev"' -o dev_version
+```
