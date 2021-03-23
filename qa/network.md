@@ -20,6 +20,16 @@
   - 504	Gateway Timeout（网关超时）
   - 505	HTTP Version Not Supported（不支持的HTTP版本）
 
+# URI和URL的区别
+HTTP使用统一资源标识符（Uniform Resource Identifiers, URI）来传输数据和建立连接。
+- URI：Uniform Resource Identifier 统一资源标识符
+- URL：Uniform Resource Location 统一资源定位符
+- 
+URI 是用来标示 一个具体的资源的，我们可以通过 URI 知道一个资源是什么。 
+
+URL 则是用来定位具体的资源的，标示了一个具体的资源位置。互联网上的每个文件都有一个唯一的URL。
+
+
 # http报文格式
 ![](./img/20170330192653242.png)
 ![](./img/20170330192754102.png)
@@ -72,6 +82,15 @@ REST POST和REST PUT的区别。有些api是使用PUT作为创建资源的Method
 
 [参考](https://www.zhihu.com/question/28586791)
 
+# HTTPS
+http 中存在的问题：
+- 请求信息明文传输，容易被窃听截取。
+- 数据的完整性未校验，容易被篡改
+- 没有验证对方身份，存在冒充危险
+
+HTTPS就是在HTTP（超文本传输协议）的基础上再加一层TLS（传输层安全性协议）或者SSL（安全套接层），说白了就是为了应付HTTP是明文传输的缺点，容易被中间人窃听或者篡改，导致隐私和信息安全出现问题的解决方案。
+
+[参考](https://zhuanlan.zhihu.com/p/158593966)
 
 # 如何理解 HTTP 协议是无状态的
 
