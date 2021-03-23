@@ -129,3 +129,26 @@ BASE 是 Basically Available（基本可用）、Soft state（软状态）和 Ev
 
 [参考1](https://www.cnblogs.com/dyzcs/p/13780668.html)
 [参考2](https://zhuanlan.zhihu.com/p/183753774)
+
+# 全链路追踪
+为了解决不同的分布式追踪系统 API 不兼容的问题，诞生了 OpenTracing 规范。OpenTracing 是一个轻量级的标准化层，它位于应用程序/类库和追踪或日志分析程序之间。
+
+opentracing span和trace
+
+一个 trace 代表了一个事务或者流程在（分布式）系统中的执行过程；是一次调用的统称。可以看作是span的有向无环图。
+
+一个 span 代表在分布式系统中完成的单个工作单元，也包含其他 span 的 “引用”，这允许将多个 spans 组合成一个完整的 Trace。
+
+![](./img/5de217590001e13213460598.jpg)
+
+每个 Span 包含以下对象：
+
+- Operation name：操作名称 （也可以称作 Span name）。
+- Start timestamp：起始时间。
+- Finish timestamp：结束时间。
+- Span tag：一组键值对构成的 Span 标签集合。键值对中，键必须为 String，值可以是字符串、布尔或者数字类型。
+- Span log：一组 Span 的日志集合。每次 Log 操作包含一个键值对和一个时间戳。键值对中，键必须为 String，值可以是任意类型。
+- SpanContext: span 上下文对象。每个 SpanContext 包含以下状态：
+  - 要实现任何一个 OpenTracing，都需要依赖一个独特的 Span 去跨进程边界传输当前调用链的状态（例如：Trace 和 Span 的 ID）。
+  - Baggage Items 是 Trace 的随行数据，是一个键值对集合，存在于 Trace 中，也需要跨进程边界传输。
+  - References（Span 间关系）：相关的零个或者多个 Span（Span 间通过 SpanContext 建立这种关系）。

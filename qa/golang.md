@@ -468,3 +468,46 @@ func main() {
 ```
  go build -ldflags '-X main.version="dev"' -o dev_version
 ```
+# sync.Map
+
+Map 类型针对两种常见的用例进行优化：
+
+- 1. 给定 key 只会产生写一次但是却会多次读，类似乎只增的缓存
+- 2. 多个 goroutine 读、写以及覆盖不同的 key
+
+这两种情况下，与单独使用 Mutex 或 RWMutex 的 map 相比，会显著降低竞争情况
+
+```go
+type Map struct {
+    // 加锁作用，保护 dirty 字段
+    mu Mutex
+    // 只读的数据，实际数据类型为 readOnly
+    read atomic.Value
+    // 最新写入的数据
+    dirty map[interface{}]*entry
+    // 计数器，每次需要读 dirty 则 +1
+    misses int
+}
+```
+```go
+type readOnly struct {
+    // 内建 map
+    m  map[interface{}]*entry
+    // 表示 dirty 里存在 read 里没有的 key，通过该字段决定是否加锁读 dirty
+    amended bool
+}
+```
+```go
+type entry struct {
+    p unsafe.Pointer  // 等同于 *interface{}
+}
+```
+- 当 p == nil 时，说明这个键值对已被删除，并且 m.dirty == nil，或 m.dirty[k] 指向该 entry。
+- 当 p == expunged 时，说明这条键值对已被删除，并且 m.dirty != nil，且 m.dirty 中没有这个 key。
+- 其他情况，p 指向一个正常的值，表示实际 interface{} 的地址，并且被记录在 m.read.m[key] 中。如果这时 m.dirty 不为 nil，那么它也被记录在 m.dirty[key] 中。两者实际上指向的是同一个值。
+
+- 通过 read 和 dirty 两个字段将读写分离，读的数据存在只读字段 read 上，将最新写入的数据则存在 dirty 字段上
+- 读取时会先查询 read，不存在再查询 dirty，写入时则只写入 dirty
+- 读取 read 并不需要加锁，而读或写 dirty 都需要加锁
+- 另外有 misses 字段来统计 read 被穿透的次数（被穿透指需要读 dirty 的情况），超过一定次数则将 dirty 数据同步到 read 上
+- 对于删除数据则直接通过标记来延迟删除
