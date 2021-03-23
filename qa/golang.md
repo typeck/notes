@@ -511,3 +511,5 @@ type entry struct {
 - 读取 read 并不需要加锁，而读或写 dirty 都需要加锁
 - 另外有 misses 字段来统计 read 被穿透的次数（被穿透指需要读 dirty 的情况），超过一定次数则将 dirty 数据同步到 read 上
 - 对于删除数据则直接通过标记来延迟删除
+
+[参考](https://zhuanlan.zhihu.com/p/44585993)
