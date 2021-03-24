@@ -9,4 +9,5 @@
 - 指定import相对路径
   
   `protoc --go_out=plugins=grpc,paths=source_relative:. ./*.proto`
-  
+
+ `protoc -I /root/type -I ./ --go_out=plugins=grpc,paths=source_relative:. ./*.proto` 

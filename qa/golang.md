@@ -513,3 +513,7 @@ type entry struct {
 - 对于删除数据则直接通过标记来延迟删除
 
 [参考](https://zhuanlan.zhihu.com/p/44585993)
+
+# make 和 new
+- make 的作用是初始化内置的数据结构，也就是我们在前面提到的切片、哈希表和 Channel
+- new 的作用是根据传入的类型分配一片内存空间并返回指向这片内存空间的指针
