@@ -83,6 +83,18 @@ func main() {
 	return
 }
 ```
+# select 
+Go 语言中的 select 能够让 Goroutine 同时等待多个 Channel 可读或者可写，在多个 Channel状态改变之前，select 会一直阻塞当前Goroutine。
+
+当我们在 Go 语言中使用 select 控制结构时，会遇到两个有趣的现象：
+
+1) select 能在 Channel 上进行非阻塞的收发操作；
+   - 当存在可以收发的 Channel 时，直接处理该 Channel 对应的 case；
+   - 当不存在可以收发的 Channel 时，执行 default 中的语句；
+2) select 在遇到多个 Channel 同时响应时，会随机执行一种情况；
+
+
+
 ## golang 内存分配
 
 go的内存分配器基于 tcmalloc（thread-cache malloc）（tcmalloc 为每个线程实现了一个本地缓存， 区分了小对象（小于 32kb）和大对象分配两种分配类型，其管理的内存单元称为 span。）
