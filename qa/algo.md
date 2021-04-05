@@ -1,5 +1,7 @@
 # 排序算法
+
 ## 快速排序
+
 基本思想是：通过一趟排序将要排序的数据分割成独立的两部分，其中一部分的所有数据都比另外一部分的所有数据都要小， 分割点称为轴心，然后再按此方法对这两部分数据分别进行快速排序，整个排序过程可以递归进行，以此达到整个数据变成有序序列。
 
 ```c++
@@ -39,6 +41,7 @@ void partition(vector<int>& nums, int l, int r) {
 由于l, r的移动方向相反， 故原处于左端较大的元素将按颠倒的次序转移至右端， 因此**快排并不稳定**。
 
 复杂度：
+
 - 最坏：O(n平方)
 - 平均: O(nlog(n))
 - 最好: O(nlog(n))
@@ -80,7 +83,6 @@ void merge(vector<int>& nums, int l, int m, int r, vector<int>& temp) {
 ```
 
 - 复杂度： O(nlog(n))
-
 - 稳定性： 稳定; 合并过程中我们可以保证如果两个当前元素相等时，我们把处在前面的序列的元素保存在结果序列的前面，这样就保证了稳定性。
 
 ## 选择排序
@@ -124,14 +126,14 @@ void bubble_sort(vector<int>&nums, int n) {
     }
     if (!swapped) {
     break;
-}    
+}  
 ```
 
 - 复杂度： O(n平方)
-
 - 稳定性： 稳定;
 
-# todo 
+## todo
+
 桶排序（top k频次），堆排序（top k 大小）
 
 # 如何在有限的内存限制下实现数十亿级手机号码去重（bitmap）
@@ -139,6 +141,7 @@ void bubble_sort(vector<int>&nums, int n) {
 https://www.jianshu.com/p/b39eb55d4670?utm_campaign=maleskine&utm_content=note&utm_medium=seo_notes&utm_source=recommendation
 
 # 红黑树
+
 红黑树是一种自平衡的二叉查找树，是一种高效的查找树。红黑树具有良好的效率，它可在 O(logN) 时间内完成查找、增加、删除等操作。
 
 自平衡的查找树通过定义一些性质，将任意节点的左右子树高度差控制在规定范围内，以达到平衡状态。
@@ -148,5 +151,5 @@ https://www.jianshu.com/p/b39eb55d4670?utm_campaign=maleskine&utm_content=note&u
 - 所有叶子都是黑色（叶子是NIL节点）。
 - 每个红色节点必须有两个黑色的子节点。（从每个叶子到根的所有路径上不能有两个连续的红色节点。）
 - 从任一节点到其每个叶子的所有简单路径都包含相同数目的黑色节点（简称黑高）。
-  
+
 性质4和性质5作为约束，即可保证任意节点到其每个叶子节点路径最长不会超过最短路径的2倍。
