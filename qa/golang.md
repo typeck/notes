@@ -706,11 +706,9 @@ if a.ptr != b.ptr {
 
 # map
 
-
-
 golang的map是hashmap，是使用数组+链表的形式实现的，使用拉链法消除hash冲突。
 
-golang的map由两种重要的结构，hmap和bmap(下文中都有解释)，主要就是hmap中包含一个指向bmap数组的指针，key经过hash函数之后得到一个数，这个数低位用于选择bmap(当作bmap数组指针的下表)，高位用于放在bmap的[8]uint8数组中，用于快速试错。然后一个bmap可以指向下一个bmap(拉链)。
+golang的map由两种重要的结构，hmap和bmap，主要就是hmap中包含一个指向bmap数组的指针，key经过hash函数之后得到一个数，这个数低位用于选择bmap(当作bmap数组指针的下表)，高位用于放在bmap的[8]uint8数组中，用于快速试错。然后一个bmap可以指向下一个bmap(拉链)。
 
 Go 语言运行时同时使用了多个数据结构组合表示哈希表，其中 [`runtime.hmap`](https://draveness.me/golang/tree/runtime.hmap) 是最核心的结构体，我们先来了解一下该结构体的内部字段：
 
@@ -721,11 +719,6 @@ type hmap struct {
 	B         uint8//桶数量
 	noverflow uint16
 	hash0     uint32//哈希种子，引入随机性
-	count     int
-	flags     uint8
-	B         uint8
-	noverflow uint16
-	hash0     uint32
 
 	buckets    unsafe.Pointer
 	oldbuckets unsafe.Pointer//oldbuckets 是哈希在扩容时用于保存之前 buckets 的字段，它的大小是当前 buckets 的一半；
@@ -740,24 +733,6 @@ type mapextra struct {
 	nextOverflow *bmap
 }
 
-	buckets    unsafe.Pointer
-	oldbuckets unsafe.Pointer
-	nevacuate  uintptr
-
-	extra *mapextra
-}
-
-type mapextra struct {
-	overflow    *[]*bmap
-	oldoverflow *[]*bmap
-	nextOverflow *bmap
-}
-```
-
-![](./img/hmap-and-buckets.png)
-哈希表 [`runtime.hmap`](https://draveness.me/golang/tree/runtime.hmap) 的桶是 [`runtime.bmap`](https://draveness.me/golang/tree/runtime.bmap)。每一个 [`runtime.bmap`](https://draveness.me/golang/tree/runtime.bmap) 都能存储 8 个键值对，当哈希表中存储的数据过多，单个桶已经装满时就会使用 `extra.nextOverflow` 中桶存储溢出的数据。
-
-```go
 type bmap struct {
     topbits  [8]uint8
     keys     [8]keytype
@@ -766,12 +741,36 @@ type bmap struct {
     overflow uintptr
 }
 ```
+
+![](./img/hmap-and-buckets.png)
+哈希表 [`runtime.hmap`](https://draveness.me/golang/tree/runtime.hmap) 的桶是 [`runtime.bmap`](https://draveness.me/golang/tree/runtime.bmap)。每一个 [`runtime.bmap`](https://draveness.me/golang/tree/runtime.bmap) 都能存储 8 个键值对，当哈希表中存储的数据过多，单个桶已经装满时就会使用 `extra.nextOverflow` 中桶存储溢出的数据。
+
+buckets 字段中是存储桶数据的地方。正常会一次申请至少2^N长度的数组，数组中每个元素就是一个桶。N 就是结构体中的B。
+**为啥是2的幂次方** 为了做完hash后，通过掩码的方式取到数组的偏移量, 省掉了不必要的计算（即求余操作可以转换成位移操作）hash map中很常见  X % 2^n  = X & (2^n - 1)。
+**bucket 的偏移是怎么计算的** hash 方法有多个，在 runtime/alg.go 里面定义了。不同的类型用不同的hash算法。算出来是一个uint32的一个hash 码，通过和B取掩码，就找到了bucket的偏移了。
+```go
+// 根据key的类型取相应的hash算法
+alg := t.key.alg
+hash := alg.hash(key, uintptr(h.hash0))
+// 根据B拿到一个掩码
+m := bucketMask(h.B)
+// 通过掩码以及hash指，计算偏移得到一个bucket
+b := (*bmap)(add(h.buckets, (hash&m)*uintptr(t.bucketsize)))
+```
 随着哈希表存储的数据逐渐增多，我们会扩容哈希表或者使用额外的桶存储溢出的数据，不会让单个桶中的数据超过 8 个，不过溢出桶只是临时的解决方案，创建过多的溢出桶最终也会导致哈希的扩容。
 
 ## 初始化
-
+```go
+// hint 就是 make 初始化map 的第二个参数
+func makemap(t *maptype, hint int, h *hmap) *hmap
+func makemap64(t *maptype, hint int64, h *hmap) *hmap
+func makemap_small() *hmap
+```
+区别在于：
+如果不指定 hint，就调用makemap_small；
+如果make 第二个参数为int64, 则调用makemap64；
+其他情况调用makemap方法
 runtime.makemap:
-
 ```go
 func makemap(t *maptype, hint int, h *hmap) *hmap {
 	mem, overflow := math.MulUintptr(uintptr(hint), t.bucket.size)
@@ -848,13 +847,25 @@ bucketloop:
 
 当形如 `hash[k]` 的表达式出现在赋值符号左侧时，该表达式也会在编译期间转换成 [`runtime.mapassign`](https://draveness.me/golang/tree/runtime.mapassign) 函数的调用
 
+在查找key之前，会做异常检测，校验map是否未初始化，或正在并发写操作，如果存在，则抛出异常：（这就是为什么map 并发写回panic的原因）
+```go
+if h == nil {
+  panic(plainError("assignment to entry in nil map"))
+}
+// 竟态检查 和 内存扫描
+
+if h.flags&hashWriting != 0 {
+  throw("concurrent map writes")
+}
+```
+
 首先是函数会根据传入的键拿到对应的哈希和桶：
 
 ```go
 func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	alg := t.key.alg
 	hash := alg.hash(key, uintptr(h.hash0))
-
+	//标记正在写
 	h.flags ^= hashWriting
 
 again:
@@ -866,8 +877,8 @@ again:
 
 如果当前桶已经满了，哈希会调用 [`runtime.hmap.newoverflow`](https://draveness.me/golang/tree/runtime.hmap.newoverflow) 创建新桶或者使用 [`runtime.hmap`](https://draveness.me/golang/tree/runtime.hmap) 预先在 `noverflow` 中创建好的桶来保存数据，新创建的桶不仅会被追加到已有桶的末尾，还会增加哈希表的 `noverflow` 计数器。
 
-随着哈希表中元素的逐渐增加，哈希的性能会逐渐恶化，所以我们需要更多的桶和更大的内存保证哈希的读写性能：
-
+随着哈希表中元素的逐渐增加，哈希的性能会逐渐恶化，所以我们需要更多的桶和更大的内存保证哈希的读写性能，
+插入数据前，会先检查数据太多了，需要扩容：
 ```go
 func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	...
@@ -881,8 +892,8 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 
 [`runtime.mapassign`](https://draveness.me/golang/tree/runtime.mapassign) 函数会在以下两种情况发生时触发哈希的扩容：
 
-1. 装载因子(元素数量/桶数量)已经超过 6.5；
-2. 哈希使用了太多溢出桶；
+1. 装载因子(元素数量/桶数量)已经超过 6.5；（翻倍扩容）
+2. 哈希使用了太多溢出桶；(等量扩容)
 
 不过因为 Go 语言哈希的扩容不是一个原子的过程，所以 [`runtime.mapassign`](https://draveness.me/golang/tree/runtime.mapassign) 还需要判断当前哈希是否已经处于扩容状态，避免二次扩容造成混乱。
 
@@ -896,5 +907,7 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 哈希在存储元素过多时会触发扩容操作，每次都会将桶的数量翻倍，扩容过程不是原子的，而是通过 [`runtime.growWork`](https://draveness.me/golang/tree/runtime.growWork) 增量触发的，在扩容期间访问哈希表时会使用旧桶，向哈希表写入数据时会触发旧桶元素的分流。除了这种正常的扩容之外，为了解决大量写入、删除造成的内存泄漏问题，哈希引入了 `sameSizeGrow` 这一机制，在出现较多溢出桶时会整理哈希的内存减少空间的占用。
 
 [参考1](https://draveness.me/golang/docs/part2-foundation/ch03-datastructure/golang-hashmap/)
-
 [参考2](https://www.cnblogs.com/maji233/p/11070853.html)
+[参考3](https://www.cnblogs.com/-lee/p/12777241.html)
+[参考4](https://my.oschina.net/renhc/blog/2208417?nocache=1539143037904)
+
