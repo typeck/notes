@@ -911,3 +911,127 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 [参考3](https://www.cnblogs.com/-lee/p/12777241.html)
 [参考4](https://my.oschina.net/renhc/blog/2208417?nocache=1539143037904)
 
+# defer
+作为一个编程语言中的关键字，defer 的实现一定是由编译器和运行时共同完成的
+
+defer的两个问题：
+- defer 关键字的调用时机以及多次调用 defer 时执行顺序是如何确定的；
+- defer 关键字使用传值的方式传递参数时会进行预计算，导致不符合预期的结果；
+  
+## defer作用域
+```go
+func main() {
+    {
+        defer fmt.Println("defer runs")
+        fmt.Println("block ends")
+    }
+    
+    fmt.Println("main ends")
+}
+```
+```sh
+$ go run main.go
+block ends
+main ends
+defer runs
+```
+从上述代码的输出我们会发现，defer 传入的函数不是在退出代码块的作用域时执行的，它只会在当前函数和方法返回之前被调用。
+
+## 预计算参数
+```go
+func main() {
+	startedAt := time.Now()
+	defer fmt.Println(time.Since(startedAt))
+	
+	time.Sleep(time.Second)
+}
+```
+```sh
+$ go run main.go
+0s
+```
+调用 defer 关键字会立刻拷贝函数中引用的外部参数，所以 time.Since(startedAt) 的结果不是在 main 函数退出之前计算的，而是在 defer 关键字调用时计算的，最终导致上述代码输出 0s。
+
+解决：使用匿名函数
+```go
+func main() {
+	startedAt := time.Now()
+	defer func() { fmt.Println(time.Since(startedAt)) }()
+	
+	time.Sleep(time.Second)
+}
+```
+## 数据结构
+```go
+type _defer struct {
+	siz       int32
+	started   bool
+	openDefer bool
+	sp        uintptr
+	pc        uintptr
+	fn        *funcval
+	_panic    *_panic
+	link      *_defer
+}
+```
+runtime._defer 结构体是延迟调用链表上的一个元素，所有的结构体都会通过 link 字段串联成链表。
+
+- siz 是参数和结果的内存大小；
+- sp 和 pc 分别代表栈指针和调用方的程序计数器；
+- fn 是 defer 关键字中传入的函数；
+- _panic 是触发延迟调用的结构体，可能为空；
+- openDefer 表示当前 defer 是否经过开放编码的优化；
+
+## 执行机制
+```go
+func (s *state) stmt(n *Node) {
+	...
+	switch n.Op {
+	case ODEFER:
+		if s.hasOpenDefers {
+			s.openDeferRecord(n.Left) // 开放编码
+		} else {
+			d := callDefer // 堆分配
+			if n.Esc == EscNever {
+				d = callDeferStack // 栈分配
+			}
+			s.callResult(n.Left, d)
+		}
+	}
+}
+```
+### 堆上分配
+当运行时将 runtime._defer 分配到堆上时，Go 语言的编译器不仅将 defer 转换成了 runtime.deferproc，还在所有调用 defer 的函数结尾插入了 runtime.deferreturn。上述两个运行时函数是 defer 关键字运行时机制的入口，它们分别承担了不同的工作：
+
+- runtime.deferproc 负责创建新的延迟调用；
+- runtime.deferreturn 负责在函数调用结束时执行所有的延迟调用；
+
+![](img/2020-01-19-15794017184614-golang-new-defer.png)
+defer 关键字的插入顺序是从后向前的，而 defer 关键字执行是从前向后的，这也是为什么后调用的 defer 会优先执行。
+
+runtime.deferreturn 会多次判断当前 Goroutine 的 _defer 链表中是否有未执行的结构体，该函数只有在所有延迟函数都执行后才会返回。
+
+## 栈上分配
+当该关键字在函数体中最多执行一次时，编译期间的 cmd/compile/internal/gc.state.call 会将结构体分配到栈上并调用 runtime.deferprocStack：（go1.13）
+
+除了分配位置的不同，栈上分配和堆上分配的 runtime._defer 并没有本质的不同，而该方法可以适用于绝大多数的场景，与堆上分配的 runtime._defer 相比，该方法可以将 defer 关键字的额外开销降低 ~30%。
+
+## 开放编码
+Go 语言在 1.14 中通过开放编码（Open Coded）实现 defer 关键字，该设计使用代码内联优化 defer 关键的额外开销并引入函数数据 funcdata 管理 panic 的调用3，该优化可以将 defer 的调用开销从 1.13 版本的 ~35ns 降低至 ~6ns 左右。
+开放编码只会在满足以下的条件时启用：
+
+- 函数的 defer 数量少于或者等于 8 个；
+- 函数的 defer 关键字不能在循环中执行；
+- 函数的 return 语句与 defer 语句的乘积小于或者等于 15 个；
+
+Go 语言会在编译期间就确定是否启用开放编码，一旦确定使用开放编码，就会在编译期间初始化延迟比特和延迟记录。
+
+延迟比特和延迟记录是使用开放编码实现 defer 的两个最重要结构，一旦决定使用开放编码，cmd/compile/internal/gc.buildssa 会在编译期间在栈上初始化大小为 8 个比特的 deferBits 变量。
+因为不是函数中所有的 defer 语句都会在函数返回前执行，例如只会在 if 语句的条件为真时，其中的 defer 语句才会在结尾被执行。
+
+两个问题的结论：
+- 后调用的 defer 函数会先执行：
+  - 后调用的 defer 函数会被追加到 Goroutine _defer 链表的最前面；
+  - 运行 runtime._defer 时是从前到后依次执行；
+- 函数的参数会被预先计算；
+  - 调用 runtime.deferproc 函数创建新的延迟调用时就会立刻拷贝函数的参数，函数的参数不会等到真正执行时计算；
