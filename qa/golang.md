@@ -706,11 +706,9 @@ if a.ptr != b.ptr {
 
 # map
 
-
-
 golang的map是hashmap，是使用数组+链表的形式实现的，使用拉链法消除hash冲突。
 
-golang的map由两种重要的结构，hmap和bmap(下文中都有解释)，主要就是hmap中包含一个指向bmap数组的指针，key经过hash函数之后得到一个数，这个数低位用于选择bmap(当作bmap数组指针的下表)，高位用于放在bmap的[8]uint8数组中，用于快速试错。然后一个bmap可以指向下一个bmap(拉链)。
+golang的map由两种重要的结构，hmap和bmap，主要就是hmap中包含一个指向bmap数组的指针，key经过hash函数之后得到一个数，这个数低位用于选择bmap(当作bmap数组指针的下表)，高位用于放在bmap的[8]uint8数组中，用于快速试错。然后一个bmap可以指向下一个bmap(拉链)。
 
 Go 语言运行时同时使用了多个数据结构组合表示哈希表，其中 [`runtime.hmap`](https://draveness.me/golang/tree/runtime.hmap) 是最核心的结构体，我们先来了解一下该结构体的内部字段：
 
@@ -721,11 +719,6 @@ type hmap struct {
 	B         uint8//桶数量
 	noverflow uint16
 	hash0     uint32//哈希种子，引入随机性
-	count     int
-	flags     uint8
-	B         uint8
-	noverflow uint16
-	hash0     uint32
 
 	buckets    unsafe.Pointer
 	oldbuckets unsafe.Pointer//oldbuckets 是哈希在扩容时用于保存之前 buckets 的字段，它的大小是当前 buckets 的一半；
@@ -740,24 +733,6 @@ type mapextra struct {
 	nextOverflow *bmap
 }
 
-	buckets    unsafe.Pointer
-	oldbuckets unsafe.Pointer
-	nevacuate  uintptr
-
-	extra *mapextra
-}
-
-type mapextra struct {
-	overflow    *[]*bmap
-	oldoverflow *[]*bmap
-	nextOverflow *bmap
-}
-```
-
-![](./img/hmap-and-buckets.png)
-哈希表 [`runtime.hmap`](https://draveness.me/golang/tree/runtime.hmap) 的桶是 [`runtime.bmap`](https://draveness.me/golang/tree/runtime.bmap)。每一个 [`runtime.bmap`](https://draveness.me/golang/tree/runtime.bmap) 都能存储 8 个键值对，当哈希表中存储的数据过多，单个桶已经装满时就会使用 `extra.nextOverflow` 中桶存储溢出的数据。
-
-```go
 type bmap struct {
     topbits  [8]uint8
     keys     [8]keytype
@@ -766,12 +741,36 @@ type bmap struct {
     overflow uintptr
 }
 ```
+
+![](./img/hmap-and-buckets.png)
+哈希表 [`runtime.hmap`](https://draveness.me/golang/tree/runtime.hmap) 的桶是 [`runtime.bmap`](https://draveness.me/golang/tree/runtime.bmap)。每一个 [`runtime.bmap`](https://draveness.me/golang/tree/runtime.bmap) 都能存储 8 个键值对，当哈希表中存储的数据过多，单个桶已经装满时就会使用 `extra.nextOverflow` 中桶存储溢出的数据。
+
+buckets 字段中是存储桶数据的地方。正常会一次申请至少2^N长度的数组，数组中每个元素就是一个桶。N 就是结构体中的B。
+**为啥是2的幂次方** 为了做完hash后，通过掩码的方式取到数组的偏移量, 省掉了不必要的计算（即求余操作可以转换成位移操作）hash map中很常见  X % 2^n  = X & (2^n - 1)。
+**bucket 的偏移是怎么计算的** hash 方法有多个，在 runtime/alg.go 里面定义了。不同的类型用不同的hash算法。算出来是一个uint32的一个hash 码，通过和B取掩码，就找到了bucket的偏移了。
+```go
+// 根据key的类型取相应的hash算法
+alg := t.key.alg
+hash := alg.hash(key, uintptr(h.hash0))
+// 根据B拿到一个掩码
+m := bucketMask(h.B)
+// 通过掩码以及hash指，计算偏移得到一个bucket
+b := (*bmap)(add(h.buckets, (hash&m)*uintptr(t.bucketsize)))
+```
 随着哈希表存储的数据逐渐增多，我们会扩容哈希表或者使用额外的桶存储溢出的数据，不会让单个桶中的数据超过 8 个，不过溢出桶只是临时的解决方案，创建过多的溢出桶最终也会导致哈希的扩容。
 
 ## 初始化
-
+```go
+// hint 就是 make 初始化map 的第二个参数
+func makemap(t *maptype, hint int, h *hmap) *hmap
+func makemap64(t *maptype, hint int64, h *hmap) *hmap
+func makemap_small() *hmap
+```
+区别在于：
+如果不指定 hint，就调用makemap_small；
+如果make 第二个参数为int64, 则调用makemap64；
+其他情况调用makemap方法
 runtime.makemap:
-
 ```go
 func makemap(t *maptype, hint int, h *hmap) *hmap {
 	mem, overflow := math.MulUintptr(uintptr(hint), t.bucket.size)
@@ -848,13 +847,25 @@ bucketloop:
 
 当形如 `hash[k]` 的表达式出现在赋值符号左侧时，该表达式也会在编译期间转换成 [`runtime.mapassign`](https://draveness.me/golang/tree/runtime.mapassign) 函数的调用
 
+在查找key之前，会做异常检测，校验map是否未初始化，或正在并发写操作，如果存在，则抛出异常：（这就是为什么map 并发写回panic的原因）
+```go
+if h == nil {
+  panic(plainError("assignment to entry in nil map"))
+}
+// 竟态检查 和 内存扫描
+
+if h.flags&hashWriting != 0 {
+  throw("concurrent map writes")
+}
+```
+
 首先是函数会根据传入的键拿到对应的哈希和桶：
 
 ```go
 func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	alg := t.key.alg
 	hash := alg.hash(key, uintptr(h.hash0))
-
+	//标记正在写
 	h.flags ^= hashWriting
 
 again:
@@ -866,8 +877,8 @@ again:
 
 如果当前桶已经满了，哈希会调用 [`runtime.hmap.newoverflow`](https://draveness.me/golang/tree/runtime.hmap.newoverflow) 创建新桶或者使用 [`runtime.hmap`](https://draveness.me/golang/tree/runtime.hmap) 预先在 `noverflow` 中创建好的桶来保存数据，新创建的桶不仅会被追加到已有桶的末尾，还会增加哈希表的 `noverflow` 计数器。
 
-随着哈希表中元素的逐渐增加，哈希的性能会逐渐恶化，所以我们需要更多的桶和更大的内存保证哈希的读写性能：
-
+随着哈希表中元素的逐渐增加，哈希的性能会逐渐恶化，所以我们需要更多的桶和更大的内存保证哈希的读写性能，
+插入数据前，会先检查数据太多了，需要扩容：
 ```go
 func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	...
@@ -881,8 +892,8 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 
 [`runtime.mapassign`](https://draveness.me/golang/tree/runtime.mapassign) 函数会在以下两种情况发生时触发哈希的扩容：
 
-1. 装载因子(元素数量/桶数量)已经超过 6.5；
-2. 哈希使用了太多溢出桶；
+1. 装载因子(元素数量/桶数量)已经超过 6.5；（翻倍扩容）
+2. 哈希使用了太多溢出桶；(等量扩容)
 
 不过因为 Go 语言哈希的扩容不是一个原子的过程，所以 [`runtime.mapassign`](https://draveness.me/golang/tree/runtime.mapassign) 还需要判断当前哈希是否已经处于扩容状态，避免二次扩容造成混乱。
 
@@ -896,5 +907,131 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 哈希在存储元素过多时会触发扩容操作，每次都会将桶的数量翻倍，扩容过程不是原子的，而是通过 [`runtime.growWork`](https://draveness.me/golang/tree/runtime.growWork) 增量触发的，在扩容期间访问哈希表时会使用旧桶，向哈希表写入数据时会触发旧桶元素的分流。除了这种正常的扩容之外，为了解决大量写入、删除造成的内存泄漏问题，哈希引入了 `sameSizeGrow` 这一机制，在出现较多溢出桶时会整理哈希的内存减少空间的占用。
 
 [参考1](https://draveness.me/golang/docs/part2-foundation/ch03-datastructure/golang-hashmap/)
-
 [参考2](https://www.cnblogs.com/maji233/p/11070853.html)
+[参考3](https://www.cnblogs.com/-lee/p/12777241.html)
+[参考4](https://my.oschina.net/renhc/blog/2208417?nocache=1539143037904)
+
+# defer
+作为一个编程语言中的关键字，defer 的实现一定是由编译器和运行时共同完成的
+
+defer的两个问题：
+- defer 关键字的调用时机以及多次调用 defer 时执行顺序是如何确定的；
+- defer 关键字使用传值的方式传递参数时会进行预计算，导致不符合预期的结果；
+  
+## defer作用域
+```go
+func main() {
+    {
+        defer fmt.Println("defer runs")
+        fmt.Println("block ends")
+    }
+    
+    fmt.Println("main ends")
+}
+```
+```sh
+$ go run main.go
+block ends
+main ends
+defer runs
+```
+从上述代码的输出我们会发现，defer 传入的函数不是在退出代码块的作用域时执行的，它只会在当前函数和方法返回之前被调用。
+
+## 预计算参数
+```go
+func main() {
+	startedAt := time.Now()
+	defer fmt.Println(time.Since(startedAt))
+	
+	time.Sleep(time.Second)
+}
+```
+```sh
+$ go run main.go
+0s
+```
+调用 defer 关键字会立刻拷贝函数中引用的外部参数，所以 time.Since(startedAt) 的结果不是在 main 函数退出之前计算的，而是在 defer 关键字调用时计算的，最终导致上述代码输出 0s。
+
+解决：使用匿名函数
+```go
+func main() {
+	startedAt := time.Now()
+	defer func() { fmt.Println(time.Since(startedAt)) }()
+	
+	time.Sleep(time.Second)
+}
+```
+## 数据结构
+```go
+type _defer struct {
+	siz       int32
+	started   bool
+	openDefer bool
+	sp        uintptr
+	pc        uintptr
+	fn        *funcval
+	_panic    *_panic
+	link      *_defer
+}
+```
+runtime._defer 结构体是延迟调用链表上的一个元素，所有的结构体都会通过 link 字段串联成链表。
+
+- siz 是参数和结果的内存大小；
+- sp 和 pc 分别代表栈指针和调用方的程序计数器；
+- fn 是 defer 关键字中传入的函数；
+- _panic 是触发延迟调用的结构体，可能为空；
+- openDefer 表示当前 defer 是否经过开放编码的优化；
+
+## 执行机制
+```go
+func (s *state) stmt(n *Node) {
+	...
+	switch n.Op {
+	case ODEFER:
+		if s.hasOpenDefers {
+			s.openDeferRecord(n.Left) // 开放编码
+		} else {
+			d := callDefer // 堆分配
+			if n.Esc == EscNever {
+				d = callDeferStack // 栈分配
+			}
+			s.callResult(n.Left, d)
+		}
+	}
+}
+```
+### 堆上分配
+当运行时将 runtime._defer 分配到堆上时，Go 语言的编译器不仅将 defer 转换成了 runtime.deferproc，还在所有调用 defer 的函数结尾插入了 runtime.deferreturn。上述两个运行时函数是 defer 关键字运行时机制的入口，它们分别承担了不同的工作：
+
+- runtime.deferproc 负责创建新的延迟调用；
+- runtime.deferreturn 负责在函数调用结束时执行所有的延迟调用；
+
+![](img/2020-01-19-15794017184614-golang-new-defer.png)
+defer 关键字的插入顺序是从后向前的，而 defer 关键字执行是从前向后的，这也是为什么后调用的 defer 会优先执行。
+
+runtime.deferreturn 会多次判断当前 Goroutine 的 _defer 链表中是否有未执行的结构体，该函数只有在所有延迟函数都执行后才会返回。
+
+## 栈上分配
+当该关键字在函数体中最多执行一次时，编译期间的 cmd/compile/internal/gc.state.call 会将结构体分配到栈上并调用 runtime.deferprocStack：（go1.13）
+
+除了分配位置的不同，栈上分配和堆上分配的 runtime._defer 并没有本质的不同，而该方法可以适用于绝大多数的场景，与堆上分配的 runtime._defer 相比，该方法可以将 defer 关键字的额外开销降低 ~30%。
+
+## 开放编码
+Go 语言在 1.14 中通过开放编码（Open Coded）实现 defer 关键字，该设计使用代码内联优化 defer 关键的额外开销并引入函数数据 funcdata 管理 panic 的调用3，该优化可以将 defer 的调用开销从 1.13 版本的 ~35ns 降低至 ~6ns 左右。
+开放编码只会在满足以下的条件时启用：
+
+- 函数的 defer 数量少于或者等于 8 个；
+- 函数的 defer 关键字不能在循环中执行；
+- 函数的 return 语句与 defer 语句的乘积小于或者等于 15 个；
+
+Go 语言会在编译期间就确定是否启用开放编码，一旦确定使用开放编码，就会在编译期间初始化延迟比特和延迟记录。
+
+延迟比特和延迟记录是使用开放编码实现 defer 的两个最重要结构，一旦决定使用开放编码，cmd/compile/internal/gc.buildssa 会在编译期间在栈上初始化大小为 8 个比特的 deferBits 变量。
+因为不是函数中所有的 defer 语句都会在函数返回前执行，例如只会在 if 语句的条件为真时，其中的 defer 语句才会在结尾被执行。
+
+两个问题的结论：
+- 后调用的 defer 函数会先执行：
+  - 后调用的 defer 函数会被追加到 Goroutine _defer 链表的最前面；
+  - 运行 runtime._defer 时是从前到后依次执行；
+- 函数的参数会被预先计算；
+  - 调用 runtime.deferproc 函数创建新的延迟调用时就会立刻拷贝函数的参数，函数的参数不会等到真正执行时计算；
