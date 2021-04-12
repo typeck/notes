@@ -125,3 +125,163 @@ fork()之后，kernel把父进程中所有的内存页的权限都设为read-onl
 用户内存空间，每个用户进程都有各自独立的内存空间，保持彼此独立透明，互不干扰。
 
 内核内存空间，内核线程间无需切换页表，**共享内存空间。**
+
+# 同步
+
+- 核心矛盾是“竞态条件”，即多个线程同时读写某个字段。
+- 竞态条件下多线程争抢的是“竞态资源”。
+- 涉及读写竟态资源的代码片段叫“临界区”。
+- 保证竟态资源安全的最朴素的一个思路就是让临界区代码“互斥”，即同一时刻最多只能有一个线程进入临界区。
+- 最朴素的互斥手段：在进入临界区之前，用if检查一个bool值，条件不满足就“忙等”。这叫“锁变量”。
+- 但锁变量不是线程安全的。因为“检查-占锁”这个动作不具备“原子性”。
+- “TSL指令”就是原子性地完成“检查-占锁”的动作。
+- 就算不用TSL指令，也可以设计出线程安全的代码，有一种既巧妙又简洁的结构叫“自旋锁”。当然还有其他更复杂的锁比如“Peterson锁”。
+- 但自旋锁的缺点是条件不满足时会“忙等待”，需要后台调度器重新分配时间片，效率低。
+- 解决忙等待问题的是：“sleep”和“wakeup”两个原语。sleep阻塞当前线程的同时会让出它占用的锁。wakeup可以唤醒在目标锁上睡眠的线程。
+- 使用sleep和wakeup原语，保证同一时刻只有一个线程进入临界区代码片段的锁叫“互斥量”。
+- 把互斥锁推广到"N"的空间，同时允许有N个线程进入临界区的锁叫“信号量”。
+- 互斥量和信号量的实现都依赖TSL指令保证“检查-占锁”动作的原子性。
+- 把互斥量交给程序员使用太危险，有些编程语言实现了“管程”的特性，从编译器的层面保证了临界区的互斥，比如Java的synchronized关键字。
+- 并没有“同步锁”这个名词，Java的synchronized正确的叫法应该是“互斥锁”，“独占锁”或者“内置锁”。但有的人“顾名思义”叫它同步锁。
+
+## mutex（互斥量）
+mutex（mutual exclusive）即互斥量（互斥体）。也便是常说的互斥锁。尽管名称不含lock，但是称之为锁，也是没有太大问题的。mutex无疑是最常见的多线程同步方式。其思想简单粗暴，多线程共享一个互斥量，然后线程之间去竞争。得到锁的线程可以进入临界区执行代码。
+
+```c
+// 声明一个互斥量    
+pthread_mutex_t mtx;
+// 初始化 
+pthread_mutex_init(&mtx, NULL);
+// 加锁  
+pthread_mutex_lock(&mtx);
+// 解锁 
+pthread_mutex_unlock(&mtx);
+// 销毁
+pthread_mutex_destroy(&mtx);
+```
+mutex是睡眠等待（sleep waiting）类型的锁，当线程抢互斥锁失败的时候，线程会陷入休眠。优点就是节省CPU资源，缺点就是休眠唤醒会消耗一点时间。
+
+```c
+ret = pthread_mutex_trylock(&mtx);
+if (0 == ret) { // 加锁成功
+    ... 
+    pthread_mutex_unlock(&mtx);
+} else if(EBUSY == ret){ // 锁正在被使用;
+    ... 
+}
+```
+pthread_mutex_trylock用于以非阻塞的模式来请求互斥量。就好比各种IO函数都有一个noblock的模式一样，对于加锁这件事也有类似的非阻塞模式。
+
+## condition variable（条件变量）
+
+条件变量不是锁，它是一种线程间的通讯机制，并且几乎总是和互斥量一起使用的。所以互斥量和条件变量二者一般是成套出现的。
+
+```c
+// 声明一个互斥量     
+pthread_mutex_t mtx;
+// 声明一个条件变量
+pthread_cond_t cond;
+...
+
+// 初始化 
+pthread_mutex_init(&mtx, NULL);
+pthread_cond_init(&cond, NULL);
+
+// 加锁  
+pthread_mutex_lock(&mtx);
+// 加锁成功，等待条件变量触发
+pthread_cond_wait(&cond, &mtx);
+
+...
+// 加锁  
+pthread_mutex_lock(&mtx);
+pthread_cond_signal(&cond);
+...
+
+// 解锁 
+pthread_mutex_unlock(&mtx);
+// 销毁
+pthread_mutex_destroy(&mtx);
+```
+pthread_cond_wait函数会把条件变量和互斥量都传入。并且多线程调用的时候条件变量和互斥量一定要一一对应，不能一个条件变量在不同线程中wait的时候传入不同的互斥量。否则是未定义结果。
+
+另外在使用条件变量的过程中有个稍微违反直觉的写法：那就是使用while而不是if来做判断状态是否满足。这样做的原因有二：
+- 避免惊群；
+- 避免某些情况下线程被虚假唤醒（即没有pthread_cond_signal就解除了阻塞）。
+
+```c++
+while (1) {
+    if (pthread_mutex_lock(&mtx) != 0) { // 加锁
+        ... // 异常逻辑
+    }
+    while (!queue.empty()) {
+        if (pthread_cond_wait(&cond, &mtx) != 0) {
+            ... // 异常逻辑
+        }
+    }
+    auto data = queue.pop();
+    if (pthread_mutex_unlock(&mtx) != 0) { // 解锁
+        ... // 异常逻辑
+    }
+    process(data); // 处理流程，业务逻辑
+}
+```
+
+## read-write lock（读写锁）
+顾名思义『读写锁』就是对于临界区区分读和写。在读多写少的场景下，不加区分的使用互斥量显然是有点浪费的。
+
+```c
+// 声明一个读写锁
+pthread_rwlock_t rwlock;
+...
+// 在读之前加读锁
+pthread_rwlock_rdlock(&rwlock);
+
+... 共享资源的读操作
+
+// 读完释放锁
+pthread_rwlock_unlock(&rwlock);
+
+// 在写之前加写锁
+pthread_rwlock_wrlock(&rwlock); 
+
+... 共享资源的写操作
+
+// 写完释放锁
+pthread_rwlock_unlock(&rwlock);
+
+// 销毁读写锁
+pthread_rwlock_destroy(&rwlock);
+```
+## spinlock（自旋锁）
+什么是自旋（spin）呢？更为通俗的一个词是『忙等待』（busy waiting）。最最通俗的一个理解，其实就是死循环.
+单看使用方法和使用互斥量的代码是差不多的。只不过自旋锁不会引起线程休眠。当共享资源的状态不满足的时候，自旋锁会不停地循环检测状态。因为不会陷入休眠，而是忙等待的方式也就不需要条件变量。
+
+```c
+// 声明一个自旋锁变量
+pthread_spinlock_t spinlock;
+
+// 初始化   
+pthread_spin_init(&spinlock, 0);
+
+// 加锁  
+pthread_spin_lock(&spinlock);
+
+// 解锁 
+pthread_spin_unlock(&spinlock);
+
+// 销毁  
+pthread_spin_destroy(&spinlock);
+```
+## 信号量
+信号量（英语：Semaphore）又称为信号量、旗语，是一个同步对象，用于保持在0至指定最大值之间的一个计数值。当线程完成一次对该semaphore对象的等待（wait）时，该计数值减一；当线程完成一次对semaphore对象的释放（release）时，计数值加一。当计数值为0，则线程等待该semaphore对象不再能成功直至该semaphore对象变成signaled状态。semaphore对象的计数值大于0，为signaled状态；计数值等于0，为nonsignaled状态.
+
+其中，信号量又存在着两种操作，分别为V操作与P操作，V操作会增加信号量 S的数值，P操作会减少它。
+
+- 初始化，给与它一个非负数的整数值。
+- 运行 P（wait()），信号量S的值将被减少。企图进入临界区块的进程，需要先运行 P（wait()）。当信号量S减为负值时，进程会被挡住，不能继续；当信号量S不为负值时，进程可以获准进入临界区块。
+- 运行 V（又称signal()），信号量S的值会被增加。结束离开临界区块的进程，将会运行 V（又称signal()）。当信号量S不为负值时，先前被挡住的其他进程，将可获准进入临界区块。
+
+信号量（semaphore[ˈseməfɔ:(r)]）用在多线程多任务同步的，一个线程完成了某一个动作就通过信号量告诉别的线程，别的线程再进行某些动作。而互斥锁（Mutual exclusion，缩写 Mutex）是用在多线程多任务互斥的，一个线程占用了某一个资源，那么别的线程就无法访问，直到这个线程unlock，其他的线程才开始可以利用这个资源。
+
+[参考](https://www.zhihu.com/question/66733477/answer/1267625567)
