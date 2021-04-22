@@ -63,6 +63,7 @@ this is a test
     NF 浏览记录的字段个数
     NR 已读的记录数
     ``` 
+- 多行合并成一行并逗号分割：`awk ' { printf ("%s ", $0)} END {printf ("\n") } '`
 [参考](https://www.linuxprobe.com/linux-awk-clever.html)
 
 ## sed
