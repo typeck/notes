@@ -171,7 +171,14 @@ Raft通过为选举过程添加一个限制条件，解决了上面提出的问�
 如果命令已经被复制到了大部分节点上,但是还没来的及提交就崩溃了,这样后来的leader应该完成之前term未完成的提交. Raft通过让leader统计当前term内还未提交的命令已经被复制的数量是否半数以上, 然后进行提交.
 
 raft与其他协议（Viewstamped Replication、mongodb）不同，raft始终保证leade包含最新的已提交的日志，因此leader不会从follower catchup日志，这也大大简化了系统的复杂度。
+## 脑裂
+在任何有主从之分的系统中，都可能会发生此问题。
 
+Follower不能区分是Leader挂掉了还是Leader与Follower的网络出现了问题（哨兵中也可能存在这种情况），可能会发生Leader没挂，Follower连接不上Leader，并再选出一个Leader，导致同时存在两个Leader。
+
+Raft要求多数同意才能达成共识，所以旧Leader撑死会提供读服务，并提供了旧的数据，但是始终不会提供写服务，导致数据不一致。
+
+对于client向旧Leader不断请求这件事。可以让client隔一段时间就去请求一遍所有节点，对比term，挑选出term最大的Leader。
 [go raft](https://github.com/LLHFWT/rache)
 
 
