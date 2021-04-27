@@ -360,6 +360,18 @@ TCP 协议使用慢启动阈值（Slow start threshold, ssthresh）来决定使�
 
 [参考](https://zhuanlan.zhihu.com/p/108822858)
 
+
+# ping
+ping命令主要基于ICMP（Internet Control Message Protocol）实现，它包含了两部分：客户端、服务器。
+
+- 客户端：向服务端发送ICMP回显请求报文（echo message）。
+- 服务端：向客户端返回ICMP回西显响应报文（echo reply message）。
+
+ICMP 的全称是 Internet Control Message Protocol(互联网控制协议)，它是一种互联网套件，它用于IP 协议中发送控制消息。也就是说，ICMP 是依靠 IP 协议来完成信息发送的，它是 IP 的主要部分，但是从体系结构上来讲，它位于 IP 之上，因为 ICMP 报文是承载在 IP 分组中的，就和 TCP 与 UDP 报文段作为 IP 有效载荷被承载那样。这也就是说，当主机收到一个指明上层协议为 ICMP 的 IP 数据报时，它会分解出该数据报的内容给 ICMP，就像分解数据报的内容给 TCP 和 UDP 一样。
+
+ICMP 协议和 TCP、UDP 等协议不同，它不用于传输数据，只是用来发送消息。因为 IP 协议现在有两类版本：IPv4 和 IPv6 ，所以 ICMP 也有两个版本：ICMPv4 和 ICMPv6。
+
+
 # linux 网络模型
 
 五种IO的模型：阻塞IO、非阻塞IO、多路复用IO、信号驱动IO和异步IO；前四种都是同步IO，在内核数据copy到用户空间时都是阻塞的。
