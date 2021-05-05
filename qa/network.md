@@ -27,7 +27,6 @@ HTTP使用统一资源标识符（Uniform Resource Identifiers, URI）来传输�
 
 - URI：Uniform Resource Identifier 统一资源标识符
 - URL：Uniform Resource Location 统一资源定位符
--
 
 URI 是用来标示 一个具体的资源的，我们可以通过 URI 知道一个资源是什么。
 
