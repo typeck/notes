@@ -8,13 +8,12 @@ MySQL 主从复制是指数据可以从一个MySQL数据库服务器主节点复
 - 数据实时备份，当系统中某个节点发生故障时，可以方便的故障切换
 - 高可用HA
 - 架构扩展
--
 
 ## 原理
 
 MySQL主从复制涉及到三个线程，一个运行在主节点（log dump thread），其余两个(I/O thread, SQL thread)运行在从节点，如下图所示:
 ![](img/v2-1b0c3f31bd398c39b9e0930059b0ca24_b.jpg)
-
+- mysql 按事务提交的顺序而非sql执行顺序来记录binlog，记录binlog后，主库会告诉存储引擎提交事务。
 - 主节点 binary log dump 线程当从节点连接主节点时，主节点会创建一个log dump 线程，用于发送bin-log的内容。在读取bin-log中的操作时，此线程会对主节点上的bin-log加锁，当读取完成，甚至在发动给从节点之前，锁会被释放。
 - 从节点I/O线程当从节点上执行`start slave`命令之后，从节点会创建一个I/O线程用来连接主节点，请求主库中更新的bin-log。I/O线程接收到主节点binlog dump 进程发来的更新之后，保存在本地relay-log中。
 - 从节点SQL线程SQL线程负责读取relay log中的内容，解析成具体的操作并执行，最终保证主从数据的一致性。
