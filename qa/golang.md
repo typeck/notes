@@ -1359,7 +1359,7 @@ type FD struct {
 	isFile bool
 }
 ```
-# pollDesc
+## pollDesc
 pollDesc 是底层事件驱动的封装，netFD 通过它来完成各种 I/O 相关的操作，它的定义如下：
 ```go
 type pollDesc struct {
@@ -1467,3 +1467,66 @@ runtime.netpoll 的核心逻辑是：
 Go 在多种场景下都可能会调用 netpoll 检查文件描述符状态，netpoll 里会调用 epoll_wait 从 epoll 的 eventpoll.rdllist 就绪双向链表返回，从而得到 I/O 就绪的 socket fd 列表，并根据取出最初调用 epoll_ctl 时保存的上下文信息，恢复 g。所以执行完netpoll 之后，会返回一个就绪 fd 列表对应的 goroutine 链表，接下来将就绪的 goroutine 通过调用 injectglist 加入到全局调度队列或者 P 的本地调度队列中，启动 M 绑定 P 去执行。
 
 [参考](https://zhuanlan.zhihu.com/p/299047984)
+
+# sync.WaitGroup
+```go
+sync.WaitGroup 可以达到并发 Goroutine 的执行屏障的效果，等待多个 Goroutine 执行完毕。
+
+// WaitGroup 用于等待一组 Goroutine 执行完毕。
+// 主 Goroutine 调用 Add 来设置需要等待的 Goroutine 的数量
+// 然后每个 Goroutine 运行并调用 Done 来确认已经执行网完毕
+// 同时，Wait 可以用于阻塞并等待所有 Goroutine 完成。
+//
+// WaitGroup 在第一次使用后不能被复制
+type WaitGroup struct {
+	// 64 位值: 高 32 位用于计数，低 32 位用于等待计数
+	// 64 位的原子操作要求 64 位对齐，但 32 位编译器无法保证这个要求
+	// 因此分配 12 字节然后将他们对齐，其中 8 字节作为状态，其他 4 字节用于存储原语
+	state1 [3]uint32
+}
+```
+
+为了便于理解 WaitGroup 的整个实现过程，我们暂时先不考虑内存对齐和并发安全等方面因素。那么 WaitGroup 可以近似的看做以下代码：
+```go
+type WaitGroup struct {
+    counter int32
+    waiter  uint32
+    sema    uint32
+}
+```
+- counter 代表目前尚未完成的个数。WaitGroup.Add(n) 将会导致 counter += n, 而 WaitGroup.Done() 将导致 counter--。
+- waiter 代表目前已调用 WaitGroup.Wait 的 goroutine 的个数。
+- sema 对应于 golang 中 runtime 内部的信号量的实现。WaitGroup 中会用到 sema 的两个相关函数，runtime_Semacquire 和 runtime_Semrelease。runtime_Semacquire 表示增加一个信号量，并挂起 当前 goroutine。runtime_Semrelease 表示减少一个信号量，并唤醒 sema 上其中一个正在等待的 goroutine。
+
+1. 当调用 WaitGroup.Add(n) 时，counter 将会自增: counter += n
+
+2. 当调用 WaitGroup.Wait() 时，会将 waiter++。同时调用 runtime_Semacquire(semap), 增加信号量，并挂起当前 goroutine。
+
+3. 当调用 WaitGroup.Done() 时，将会 counter--。如果自减后的 counter 等于 0，说明 WaitGroup 的等待过程已经结束，则需要调用 runtime_Semrelease 释放信号量，唤醒正在 WaitGroup.Wait 的 goroutine。
+
+## WaitGroup 的底层内存结构
+我们回来讨论 WaitGroup 中 state1 的内存结构。state1 长度为 3 的 uint32 数组，但正如我们上文讨论，其中 state1 中包含了三个变量的语义和行为，其内存结构如下：
+
+![](img/v2-4c8bccb2bdc3589bf3046b9946687cd3_1440w.jpg)
+
+- 当 state1 变量是 64 位对齐时，也就意味着数组前两位作为 64 位整数时，自然也可以保证 64 位对齐了。
+- 当 state1 变量是 32 位对齐时，我们把数组第 1 位作为对齐的 padding，因为 state1 本身是 uint32 的数组，所以数组第一位也有 32 位。这样就保证了把数组后两位看做统一的 64 位整数时是64位对齐的。
+这个方法非常的巧妙，只不过是改变 sema 的位置顺序，就既可以保证 counter+waiter 一定会 64 位对齐，也可以保证内存的高效利用。
+
+WaitGroup 直接把 counter 和 waiter 看成了一个统一的 64 位变量。其中 counter 是这个变量的高 32 位，waiter 是这个变量的低 32 位。 在需要改变 counter 时, 通过将累加值左移 32 位的方式：atomic.AddUint64(statep, uint64(delta)<<32)，即可实现 count += delta 同样的效果。
+
+在 Wait 函数中，通过 CAS 操作 atomic.CompareAndSwapUint64(statep, state, state+1), 来对 waiter 进行自增操作，如果 CAS 操作返回 false，说明 state 变量有修改，有可能是 counter 发生了变化，这个时候需要重试检查逻辑条件。
+
+# go 信号量
+- 初始化信号量，给与它一个非负数的整数值。
+- 运行P（wait()），信号量S的值将被减少。企图进入临界区的进程，需要先运行P（wait()）。当信号量S减为负值时，进程会被阻塞住，不能继续；当信号量S不为负值时，进程可以获准进入临界区。
+- 运行V（signal()），信号量S的值会被增加。结束离开临界区段的进程，将会运行V（signal()）。当信号量S不为负值时，先前被阻塞住的其他进程，将可获准进入临界区。
+
+我们一般用信号量保护一组资源，比如数据库连接池、一组客户端的连接等等。**每次获取资源时都会将信号量中的计数器减去对应的数值，在释放资源时重新加回来**。当信号量没资源时尝试获取信号量的线程就会进入休眠，等待其他线程释放信号量。如果信号量是只有0和1的二进位信号量，那么，它的 P/V 就和互斥锁的 Lock/Unlock 就一样了。
+
+信号量的PV操作在Go内部是通过下面这几个底层函数实现的：
+```go
+func runtime_Semacquire(s *uint32)
+func runtime_SemacquireMutex(s *uint32, lifo bool, skipframes int)
+func runtime_Semrelease(s *uint32, handoff bool, skipframes int)
+```
