@@ -319,7 +319,7 @@ func (s *state) stmt(n *Node) {
 	_f1(_a1)
   }
   ```
-
+defer、return、返回值三者的执行逻辑应该是：return最先执行，return负责将结果写入返回值中；接着defer开始执行一些收尾工作；最后函数携带当前返回值退出。
 ## 同步
 
 **自旋锁**

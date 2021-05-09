@@ -1084,7 +1084,7 @@ Go 语言会在编译期间就确定是否启用开放编码，一旦确定使�
   - 运行 runtime._defer 时是从前到后依次执行；
 - 函数的参数会被预先计算；
   - 调用 runtime.deferproc 函数创建新的延迟调用时就会立刻拷贝函数的参数，函数的参数不会等到真正执行时计算；
-
+- defer、return、返回值三者的执行逻辑应该是：return最先执行，return负责将结果写入返回值中；接着defer开始执行一些收尾工作；最后函数携带当前返回值退出。
 # sync.Mutex
 ```go
 type Mutex struct {
