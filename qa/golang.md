@@ -4,6 +4,8 @@ Go 语言中 Channel 与 Select 语句受到 1978 年 CSP（Communication Sequen
 
 在语言设计中，Goroutine 就是 CSP 理论中的并发实体， 而 Channel 则对应 CSP 中输入输出指令的消息信道，Select 语句则是 CSP 中守卫和选择指令的组合。 他们的区别在于 CSP 理论中通信是隐式的，而 Go 的通信则是显式的由程序员进行控制； CSP 理论中守卫指令只充当 Select 语句的一个分支，多个分支的 Select 语句由选择指令进行实现。
 
+输出数据给其他使用方的目的是转移数据的使用权。并发安全的实质是保证同时只有一个并发上下文拥有数据的所有权。channel 可以很方便的将数据所有权转给其他使用方。另一个优势是组合型。如果使用 sync 里面的锁，想实现组合多个逻辑并且保证并发安全，是比较困难的。但是使用 channel + select 实现组合逻辑实在太方便了。
+
 channel 的本质是一个mutex锁加上一个环形缓存、一个发送队列、一个接收队列：
 
 ```go
@@ -89,7 +91,11 @@ func main() {
 	return
 }
 ```
+优雅close channel：
+- 不能简单的从消费者侧关闭 Channel。
+- 如果有多个生产者，它们不能关闭 Channel。
 
+使用context或者done channel来控制channel的关闭。
 ## select
 
 Go 语言中的 select 能够让 Goroutine 同时等待多个 Channel 可读或者可写，在多个 Channel状态改变之前，select 会一直阻塞当前Goroutine。
